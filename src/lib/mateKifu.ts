@@ -100,7 +100,7 @@ function parsePlayer(token: string, player: 0 | 1) {
   };
 }
 
-function parseSpn(spn: string): PositionSnapshot {
+export function parsePositionSnapshot(spn: string): PositionSnapshot {
   if (/^startpos\b/u.test(spn)) throw new Error('GUI 再生には完全な SPN 初期局面が必要です。');
   const sections = spn.split('|').map((part) => part.trim());
   if (sections.length < 7) throw new Error('SPN のセクション数が不足しています。');
@@ -225,7 +225,7 @@ export function parseMateKifu(text: string): MateKifuReplay {
   }
 
   if (!position) throw new Error('Position セクションがありません。');
-  const snapshots = [parseSpn(position)];
+  const snapshots = [parsePositionSnapshot(position)];
   moves.forEach((move, index) => {
     const nextPlayer = moves[index + 1]?.player ?? (move.player === 0 ? 1 : 0);
     snapshots.push(applyMove(snapshots[snapshots.length - 1], move, nextPlayer));

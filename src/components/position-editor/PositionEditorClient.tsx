@@ -22,7 +22,7 @@ import {
   sanitizeSnapshot,
   SHARE_PARAM_KEY,
 } from '@/lib/positionSnapshot';
-import { parseMateKifu, type MateKifuReplay } from '@/lib/mateKifu';
+import { parseMateKifu, parsePositionSnapshot, type MateKifuReplay } from '@/lib/mateKifu';
 
 type Tier = 1 | 2 | 3;
 type VisibleSlot = 0 | 1 | 2 | 3;
@@ -569,6 +569,8 @@ export default function PositionEditorClient({
   const [mateReplayStep, setMateReplayStep] = useState(0);
   const [mateKifuDialogOpen, setMateKifuDialogOpen] = useState(false);
   const [mateKifuText, setMateKifuText] = useState('');
+  const [positionTextDraft, setPositionTextDraft] = useState<string | null>(null);
+  const [positionTextError, setPositionTextError] = useState('');
 
   const candidateCardsByLevel = useMemo<Record<Tier, CardData[]>>(() => ({
     1: CARDS.filter((card) => card.level === 1),
@@ -1578,6 +1580,18 @@ export default function PositionEditorClient({
     setStorageStatus('詰み手順の再生を終了しました。');
   }, []);
 
+  const updatePositionFromText = useCallback((text: string) => {
+    setPositionTextDraft(text);
+    try {
+      applySnapshot(parsePositionSnapshot(text), {
+        status: '局面テキストを盤面へ反映しました。',
+      });
+      setPositionTextError('');
+    } catch (error) {
+      setPositionTextError(extractErrorMessage(error, '局面テキストを解釈できません。'));
+    }
+  }, [applySnapshot]);
+
   const resetAll = useCallback(() => {
     applySnapshot({
       ...DEFAULT_SNAPSHOT,
@@ -2210,9 +2224,22 @@ export default function PositionEditorClient({
 
           <section className="bg-white border border-slate-200 rounded-3xl p-5 space-y-4 shadow-2xl shadow-black/10">
             <h2 className="font-black text-slate-900 text-xl">局面テキスト</h2>
-            <pre className="text-[11px] leading-5 whitespace-pre-wrap bg-slate-900 text-slate-100 rounded-xl p-4 max-h-[80vh] overflow-auto">{positionSummary}</pre>
+            <textarea
+              value={positionTextDraft ?? positionSummary}
+              onFocus={() => setPositionTextDraft((current) => current ?? positionSummary)}
+              onChange={(event) => updatePositionFromText(event.target.value)}
+              onBlur={() => {
+                if (!positionTextError) setPositionTextDraft(null);
+              }}
+              disabled={isAnalysisActive || isMateReplayActive}
+              className="w-full min-h-64 text-[11px] leading-5 whitespace-pre-wrap bg-slate-900 text-slate-100 rounded-xl p-4 disabled:opacity-60"
+              spellCheck={false}
+            />
+            {positionTextError && (
+              <p className="text-xs text-rose-600">{positionTextError}</p>
+            )}
             <p className="text-xs text-slate-500">
-              購入済みカードは実カードIDではなく、枚数分だけブランクとして `bought` に埋めています。
+              有効な局面テキストになると盤面へ即時反映します。購入済みカードは実カードIDではなく、枚数分だけブランクとして `bought` に埋めています。
             </p>
           </section>
         </div>
