@@ -45,3 +45,9 @@ gcloud run deploy lisplendor \
 - 現在局面は URL に自動反映されます。
 - `URL共有` ボタンで現在局面の URL をコピーできます。
 - 保存済み局面一覧からも各局面の共有 URL をコピーできます。
+
+## 詰み手順の再生
+
+`csplendor/scripts/dfpn_mate_solver.py --kifu-output mate.kifu` で出力した棋譜を、
+画面上部の `詰み手順読込` から読み込めます。公開カード補充を含む手順では、
+棋譜コメントの `reveal:C<id>` 注釈を使ってめくれカードを再現します。

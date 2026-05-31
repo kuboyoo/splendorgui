@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Copy, FolderOpen, Play, RotateCcw, Save, Undo2, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Copy, FileText, FolderOpen, Play, RotateCcw, Save, Undo2, X } from 'lucide-react';
 import Header from '@/components/layout/Header';
 import Card from '@/components/board/Card';
 import Noble from '@/components/board/Noble';
@@ -22,6 +22,7 @@ import {
   sanitizeSnapshot,
   SHARE_PARAM_KEY,
 } from '@/lib/positionSnapshot';
+import { parseMateKifu, type MateKifuReplay } from '@/lib/mateKifu';
 
 type Tier = 1 | 2 | 3;
 type VisibleSlot = 0 | 1 | 2 | 3;
@@ -564,6 +565,10 @@ export default function PositionEditorClient({
   const [analysisReturningGems, setAnalysisReturningGems] = useState<PaymentVec>(zeroGems());
   const [pendingReveal, setPendingReveal] = useState<PendingRevealAction | null>(null);
   const [pendingNobleChoice, setPendingNobleChoice] = useState<PendingNobleChoice | null>(null);
+  const [mateReplay, setMateReplay] = useState<MateKifuReplay | null>(null);
+  const [mateReplayStep, setMateReplayStep] = useState(0);
+  const [mateKifuDialogOpen, setMateKifuDialogOpen] = useState(false);
+  const [mateKifuText, setMateKifuText] = useState('');
 
   const candidateCardsByLevel = useMemo<Record<Tier, CardData[]>>(() => ({
     1: CARDS.filter((card) => card.level === 1),
@@ -599,12 +604,12 @@ export default function PositionEditorClient({
   }), [annotationArrows, boardNobles, currentPlayer, playerGems, playerNames, playerNobles, playerPoints, purchasedCounts, reservedCards, visibleCards]);
 
   const activeSnapshot = useMemo<PositionSnapshot>(() => {
-    const source = analysisPosition?.snapshot ?? editorSnapshot;
+    const source = mateReplay?.snapshots[mateReplayStep] ?? analysisPosition?.snapshot ?? editorSnapshot;
     return {
       ...cloneSnapshot(source),
       annotationArrows: annotationArrows.map((arrow) => ({ ...arrow })),
     };
-  }, [analysisPosition, annotationArrows, editorSnapshot]);
+  }, [analysisPosition, annotationArrows, editorSnapshot, mateReplay, mateReplayStep]);
   const activeBlockedCardIds = useMemo(
     () => analysisPosition?.blockedCardIds ?? [],
     [analysisPosition],
@@ -651,7 +656,7 @@ export default function PositionEditorClient({
       deck_counts: activeDeckCounts,
       nobles: activeSnapshot.boardNobles.filter((nobleId) => nobleId >= 0),
       current_player: activeSnapshot.currentPlayer,
-      turn: analysisMoves.length,
+      turn: mateReplay ? mateReplayStep : analysisMoves.length,
       waiting_noble: !!pendingNobleChoice,
       game_over: false,
       winner: -1,
@@ -675,7 +680,7 @@ export default function PositionEditorClient({
       ),
     ],
     legal_actions: [],
-  }), [activeDeckCounts, activeSnapshot, analysisMoves.length, bank, pendingNobleChoice]);
+  }), [activeDeckCounts, activeSnapshot, analysisMoves.length, bank, mateReplay, mateReplayStep, pendingNobleChoice]);
 
   const buildLevelMatrixRows = useCallback((level: Tier): Array<{ color: BonusColor; cards: (CardData | null)[] }> => {
     const byColor: Record<BonusColor, CardData[]> = {
@@ -1496,6 +1501,7 @@ export default function PositionEditorClient({
     && !pendingOverflow
     && !pendingNobleChoice;
   const isAnalysisActive = analysisPosition !== null;
+  const isMateReplayActive = mateReplay !== null;
   const analysisBoardLocked = pendingReveal !== null || pendingNobleChoice !== null;
 
   const applySnapshot = useCallback((
@@ -1535,6 +1541,8 @@ export default function PositionEditorClient({
     setNameEditorTarget(null);
     setStorageDialogMode(null);
     exitAnalysisMode();
+    setMateReplay(null);
+    setMateReplayStep(0);
 
     if (options?.savedPosition) {
       finalizeSavedPosition(options.savedPosition);
@@ -1550,6 +1558,25 @@ export default function PositionEditorClient({
       setStorageStatus(options.status);
     }
   }, [exitAnalysisMode, finalizeSavedPosition]);
+
+  const loadMateKifu = useCallback(() => {
+    try {
+      const replay = parseMateKifu(mateKifuText);
+      exitAnalysisMode();
+      setMateReplay(replay);
+      setMateReplayStep(0);
+      setMateKifuDialogOpen(false);
+      setStorageStatus(`詰み手順を読み込みました: ${replay.moves.length} 手`);
+    } catch (error) {
+      setStorageStatus(extractErrorMessage(error, '棋譜を読み込めませんでした。'));
+    }
+  }, [exitAnalysisMode, mateKifuText]);
+
+  const closeMateReplay = useCallback(() => {
+    setMateReplay(null);
+    setMateReplayStep(0);
+    setStorageStatus('詰み手順の再生を終了しました。');
+  }, []);
 
   const resetAll = useCallback(() => {
     applySnapshot({
@@ -1933,14 +1960,22 @@ export default function PositionEditorClient({
                     enterAnalysisMode();
                   }
                 }}
+                disabled={isMateReplayActive}
                 className={`px-4 py-2 rounded-xl font-bold text-sm transition-colors ${
                   isAnalysisActive
                     ? 'bg-slate-800 text-white hover:bg-slate-900'
                     : 'bg-sky-600 text-white hover:bg-sky-700'
-                }`}
+                } disabled:opacity-40`}
               >
                 <Play size={15} className="inline mr-1" />
                 {isAnalysisActive ? '編集に戻る' : '検討モード'}
+              </button>
+              <button
+                onClick={() => setMateKifuDialogOpen(true)}
+                className="px-4 py-2 rounded-xl bg-violet-600 text-white font-bold text-sm hover:bg-violet-700 transition-colors"
+              >
+                <FileText size={15} className="inline mr-1" />
+                詰み手順読込
               </button>
               <button
                 onClick={resetAll}
@@ -1988,6 +2023,12 @@ export default function PositionEditorClient({
             </div>
           )}
 
+          {mateReplay && (
+            <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900">
+              詰み手順再生中 / {mateReplayStep} / {mateReplay.moves.length} 手 / 結果: {mateReplay.result || '未記載'}
+            </div>
+          )}
+
           {bankErrors.length > 0 && (
             <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 space-y-1">
               {bankErrors.map((message) => (
@@ -2007,23 +2048,23 @@ export default function PositionEditorClient({
               enableCardAnnotations
               onNobleClick={pendingNobleChoice ? (nobleId) => selectAnalysisNoble(nobleId) : undefined}
               eligibleNobleIds={pendingNobleChoice?.eligibleIds ?? []}
-              onBoardNobleSlotClick={!isAnalysisActive ? openBoardNoblePicker : undefined}
-              onVisibleSlotClick={!isAnalysisActive ? ((level, slot) => openVisiblePicker(level, slot)) : undefined}
+              onBoardNobleSlotClick={!isAnalysisActive && !isMateReplayActive ? openBoardNoblePicker : undefined}
+              onVisibleSlotClick={!isAnalysisActive && !isMateReplayActive ? ((level, slot) => openVisiblePicker(level, slot)) : undefined}
               onCardClick={isAnalysisActive && !analysisBoardLocked ? (cardId) => selectAnalysisCardForAction(cardId, 'visible') : undefined}
               onDeckClick={isAnalysisActive && !analysisBoardLocked ? (level) => selectAnalysisDeckForAction(level as Tier) : undefined}
               onGemClick={isAnalysisActive && !analysisBoardLocked ? handleAnalysisBankGemClick : undefined}
-              onPlayerGemClick={!isAnalysisActive ? ((player, gem) => openGemEditor(player, gem)) : undefined}
-              onPlayerNobleSlotClick={!isAnalysisActive ? ((player, slot) => openPlayerNoblePicker(player, slot)) : undefined}
-              onPurchasedCountClick={!isAnalysisActive ? ((player, color) => openPurchasedEditor(player, color)) : undefined}
-              onReservedSlotClick={!isAnalysisActive ? ((player, slot) => openReservedPicker(player, slot as ReservedSlot)) : undefined}
+              onPlayerGemClick={!isAnalysisActive && !isMateReplayActive ? ((player, gem) => openGemEditor(player, gem)) : undefined}
+              onPlayerNobleSlotClick={!isAnalysisActive && !isMateReplayActive ? ((player, slot) => openPlayerNoblePicker(player, slot)) : undefined}
+              onPurchasedCountClick={!isAnalysisActive && !isMateReplayActive ? ((player, color) => openPurchasedEditor(player, color)) : undefined}
+              onReservedSlotClick={!isAnalysisActive && !isMateReplayActive ? ((player, slot) => openReservedPicker(player, slot as ReservedSlot)) : undefined}
               onReservedCardClick={
                 isAnalysisActive
                   ? (analysisBoardLocked ? undefined : (cardId) => selectAnalysisCardForAction(cardId, 'reserved'))
-                  : ((cardId) => {
+                  : (isMateReplayActive ? undefined : ((cardId) => {
                     const slot = findReservedCardSlot(cardId);
                     if (!slot) return;
                     openReservedPicker(slot.player, slot.slot);
-                  })
+                  }))
               }
               publicReservedCardIds={[...displayState.players[1].reserved_cards]}
               allowOpponentReservedCardClick
@@ -2047,9 +2088,9 @@ export default function PositionEditorClient({
               isReturnSelectable={isAnalysisActive && analysisMode === 'return_gems' ? isAnalysisReturnSelectable : undefined}
               payingGems={isAnalysisActive && analysisMode === 'select_payment' ? analysisPayingGems : undefined}
               isPaymentSelectable={isAnalysisActive && analysisMode === 'select_payment' ? isAnalysisPaymentSelectable : undefined}
-              onPlayerPointClick={!isAnalysisActive ? ((player) => openPointEditor(player)) : undefined}
-              onPlayerNameClick={!isAnalysisActive ? ((player) => openNameEditor(player)) : undefined}
-              onPlayerAreaClick={!isAnalysisActive ? ((player) => setCurrentPlayer(player)) : undefined}
+              onPlayerPointClick={!isAnalysisActive && !isMateReplayActive ? ((player) => openPointEditor(player)) : undefined}
+              onPlayerNameClick={!isAnalysisActive && !isMateReplayActive ? ((player) => openNameEditor(player)) : undefined}
+              onPlayerAreaClick={!isAnalysisActive && !isMateReplayActive ? ((player) => setCurrentPlayer(player)) : undefined}
               annotationArrows={annotationArrows}
               onAnnotationArrowsChange={setAnnotationArrows}
               player0Name={currentSnapshot.playerNames[0]}
@@ -2059,6 +2100,68 @@ export default function PositionEditorClient({
         </section>
 
         <div className="space-y-6">
+          {mateReplay && (
+            <section className="bg-white border border-violet-200 rounded-3xl p-5 space-y-4 shadow-2xl shadow-black/10">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="font-black text-slate-900 text-xl">詰み手順</h2>
+                <button
+                  onClick={closeMateReplay}
+                  className="px-3 py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-bold"
+                >
+                  再生終了
+                </button>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  onClick={() => setMateReplayStep(0)}
+                  disabled={mateReplayStep === 0}
+                  className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold disabled:opacity-40"
+                >
+                  先頭
+                </button>
+                <button
+                  onClick={() => setMateReplayStep((step) => Math.max(0, step - 1))}
+                  disabled={mateReplayStep === 0}
+                  className="p-2 rounded-xl border border-slate-200 disabled:opacity-40"
+                  aria-label="1手戻す"
+                >
+                  <ChevronLeft size={16} />
+                </button>
+                <div className="text-sm font-bold text-violet-800">{mateReplayStep} / {mateReplay.moves.length}</div>
+                <button
+                  onClick={() => setMateReplayStep((step) => Math.min(mateReplay.moves.length, step + 1))}
+                  disabled={mateReplayStep === mateReplay.moves.length}
+                  className="p-2 rounded-xl border border-slate-200 disabled:opacity-40"
+                  aria-label="1手進める"
+                >
+                  <ChevronRight size={16} />
+                </button>
+                <button
+                  onClick={() => setMateReplayStep(mateReplay.moves.length)}
+                  disabled={mateReplayStep === mateReplay.moves.length}
+                  className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold disabled:opacity-40"
+                >
+                  末尾
+                </button>
+              </div>
+              <div className="space-y-2 max-h-64 overflow-y-auto border border-slate-100 rounded-xl p-2">
+                {mateReplay.moves.map((move, index) => (
+                  <button
+                    key={`${index}-${move.usi}`}
+                    onClick={() => setMateReplayStep(index + 1)}
+                    className={`block w-full text-left px-2 py-1.5 rounded-lg border text-xs font-mono ${
+                      mateReplayStep === index + 1
+                        ? 'bg-violet-100 border-violet-300 text-violet-900'
+                        : 'bg-slate-50 border-slate-100 text-slate-700'
+                    }`}
+                  >
+                    {index + 1}. P{move.player} {move.usi}{move.comment ? ` # ${move.comment}` : ''}
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+
           {isAnalysisActive && (
             <section className="bg-white border border-slate-200 rounded-3xl p-5 space-y-4 shadow-2xl shadow-black/10">
               <h2 className="font-black text-slate-900 text-xl">検討状況</h2>
@@ -2168,6 +2271,52 @@ export default function PositionEditorClient({
               >
                 返却確定
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mateKifuDialogOpen && (
+        <div
+          className="fixed inset-0 bg-black/55 backdrop-blur-sm z-[145] flex items-center justify-center p-4"
+          onClick={() => setMateKifuDialogOpen(false)}
+        >
+          <div
+            className="w-full max-w-3xl rounded-3xl bg-white border border-slate-200 shadow-2xl overflow-hidden"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-4">
+              <div>
+                <h3 className="font-black text-slate-900 text-lg">詰み手順棋譜の読み込み</h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  `dfpn_mate_solver.py --kifu-output` で生成した KIFU テキストを貼り付けてください。
+                </p>
+              </div>
+              <button
+                onClick={() => setMateKifuDialogOpen(false)}
+                className="p-2 rounded-lg text-slate-500 hover:bg-slate-100"
+                aria-label="Close"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="px-5 py-5 space-y-4">
+              <textarea
+                value={mateKifuText}
+                onChange={(event) => setMateKifuText(event.target.value)}
+                className="w-full min-h-72 px-4 py-3 rounded-2xl border border-slate-200 text-xs font-mono"
+                placeholder={'Format: Splendor KIFU v1.0\n...\nPosition: bank:...\n\n1. P0 take:WUG'}
+                autoFocus
+              />
+              <div className="flex justify-end">
+                <button
+                  onClick={loadMateKifu}
+                  disabled={!mateKifuText.trim()}
+                  className="px-4 py-2 rounded-xl bg-violet-600 text-white font-bold text-sm hover:bg-violet-700 disabled:opacity-40"
+                >
+                  読み込む
+                </button>
+              </div>
             </div>
           </div>
         </div>
