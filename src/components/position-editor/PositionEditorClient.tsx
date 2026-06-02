@@ -23,6 +23,16 @@ import {
   SHARE_PARAM_KEY,
 } from '@/lib/positionSnapshot';
 import { parseMateKifu, parsePositionSnapshot, type MateKifuReplay } from '@/lib/mateKifu';
+import {
+  applyStrategyEdge,
+  applyStrategyDeckCounts,
+  edgeMatchesBoardTarget,
+  parseMateStrategy,
+  strategyEdgeLabel,
+  type MateStrategyEdge,
+  type MateStrategyReplay,
+  type MateStrategyStep,
+} from '@/lib/mateStrategy';
 
 type Tier = 1 | 2 | 3;
 type VisibleSlot = 0 | 1 | 2 | 3;
@@ -45,6 +55,7 @@ type NoblePickerTarget =
   | { kind: 'player'; player: PlayerIndex; slot: PlayerNobleSlot };
 
 type StorageDialogMode = 'save' | 'load' | null;
+type MateReplayMode = 'auto' | 'select';
 type AnalysisActionMode =
   | 'idle'
   | 'take_gems'
@@ -569,6 +580,11 @@ export default function PositionEditorClient({
   const [mateReplayStep, setMateReplayStep] = useState(0);
   const [mateKifuDialogOpen, setMateKifuDialogOpen] = useState(false);
   const [mateKifuText, setMateKifuText] = useState('');
+  const [mateStrategyText, setMateStrategyText] = useState('');
+  const [mateStrategy, setMateStrategy] = useState<MateStrategyReplay | null>(null);
+  const [mateStrategyMode, setMateStrategyMode] = useState<MateReplayMode>('auto');
+  const [mateStrategySteps, setMateStrategySteps] = useState<MateStrategyStep[]>([]);
+  const [mateStrategyChoices, setMateStrategyChoices] = useState<MateStrategyEdge[]>([]);
   const [positionTextDraft, setPositionTextDraft] = useState<string | null>(null);
   const [positionTextError, setPositionTextError] = useState('');
 
@@ -606,19 +622,19 @@ export default function PositionEditorClient({
   }), [annotationArrows, boardNobles, currentPlayer, playerGems, playerNames, playerNobles, playerPoints, purchasedCounts, reservedCards, visibleCards]);
 
   const activeSnapshot = useMemo<PositionSnapshot>(() => {
-    const source = mateReplay?.snapshots[mateReplayStep] ?? analysisPosition?.snapshot ?? editorSnapshot;
+    const source = mateStrategySteps.at(-1)?.snapshot ?? mateReplay?.snapshots[mateReplayStep] ?? analysisPosition?.snapshot ?? editorSnapshot;
     return {
       ...cloneSnapshot(source),
       annotationArrows: annotationArrows.map((arrow) => ({ ...arrow })),
     };
-  }, [analysisPosition, annotationArrows, editorSnapshot, mateReplay, mateReplayStep]);
+  }, [analysisPosition, annotationArrows, editorSnapshot, mateReplay, mateReplayStep, mateStrategySteps]);
   const activeBlockedCardIds = useMemo(
     () => analysisPosition?.blockedCardIds ?? [],
     [analysisPosition],
   );
   const activeDeckCounts = useMemo(
-    () => buildDeckCounts(activeSnapshot.visibleCards, activeSnapshot.reservedCards),
-    [activeSnapshot],
+    () => mateStrategySteps.at(-1)?.deckCounts ?? buildDeckCounts(activeSnapshot.visibleCards, activeSnapshot.reservedCards),
+    [activeSnapshot, mateStrategySteps],
   );
 
   const editorUsedCards = useMemo(() => buildUsedCardSet(editorSnapshot), [editorSnapshot]);
@@ -658,7 +674,7 @@ export default function PositionEditorClient({
       deck_counts: activeDeckCounts,
       nobles: activeSnapshot.boardNobles.filter((nobleId) => nobleId >= 0),
       current_player: activeSnapshot.currentPlayer,
-      turn: mateReplay ? mateReplayStep : analysisMoves.length,
+      turn: mateStrategy ? Math.max(0, mateStrategySteps.length - 1) : (mateReplay ? mateReplayStep : analysisMoves.length),
       waiting_noble: !!pendingNobleChoice,
       game_over: false,
       winner: -1,
@@ -682,7 +698,7 @@ export default function PositionEditorClient({
       ),
     ],
     legal_actions: [],
-  }), [activeDeckCounts, activeSnapshot, analysisMoves.length, bank, mateReplay, mateReplayStep, pendingNobleChoice]);
+  }), [activeDeckCounts, activeSnapshot, analysisMoves.length, bank, mateReplay, mateReplayStep, mateStrategy, mateStrategySteps.length, pendingNobleChoice]);
 
   const buildLevelMatrixRows = useCallback((level: Tier): Array<{ color: BonusColor; cards: (CardData | null)[] }> => {
     const byColor: Record<BonusColor, CardData[]> = {
@@ -1503,7 +1519,16 @@ export default function PositionEditorClient({
     && !pendingOverflow
     && !pendingNobleChoice;
   const isAnalysisActive = analysisPosition !== null;
-  const isMateReplayActive = mateReplay !== null;
+  const isMateStrategyActive = mateStrategy !== null;
+  const isMateReplayActive = mateReplay !== null || isMateStrategyActive;
+  const mateStrategyCurrentStep = mateStrategySteps.at(-1) ?? null;
+  const mateStrategyCurrentNode = mateStrategyCurrentStep && mateStrategy
+    ? mateStrategy.nodes.get(mateStrategyCurrentStep.nodeId) ?? null
+    : null;
+  const mateStrategyOutgoing = useMemo(
+    () => mateStrategyCurrentNode?.children ?? [],
+    [mateStrategyCurrentNode],
+  );
   const analysisBoardLocked = pendingReveal !== null || pendingNobleChoice !== null;
 
   const applySnapshot = useCallback((
@@ -1545,6 +1570,9 @@ export default function PositionEditorClient({
     exitAnalysisMode();
     setMateReplay(null);
     setMateReplayStep(0);
+    setMateStrategy(null);
+    setMateStrategySteps([]);
+    setMateStrategyChoices([]);
 
     if (options?.savedPosition) {
       finalizeSavedPosition(options.savedPosition);
@@ -1567,6 +1595,9 @@ export default function PositionEditorClient({
       exitAnalysisMode();
       setMateReplay(replay);
       setMateReplayStep(0);
+      setMateStrategy(null);
+      setMateStrategySteps([]);
+      setMateStrategyChoices([]);
       setMateKifuDialogOpen(false);
       setStorageStatus(`詰み手順を読み込みました: ${replay.moves.length} 手`);
     } catch (error) {
@@ -1574,9 +1605,67 @@ export default function PositionEditorClient({
     }
   }, [exitAnalysisMode, mateKifuText]);
 
+  const loadMateStrategy = useCallback(() => {
+    try {
+      const replay = parseMateStrategy(mateStrategyText);
+      exitAnalysisMode();
+      setMateReplay(null);
+      setMateReplayStep(0);
+      setMateStrategy(replay);
+      setMateStrategyMode('auto');
+      setMateStrategySteps([{
+        nodeId: replay.root,
+        snapshot: replay.initialSnapshot,
+        deckCounts: replay.initialDeckCounts,
+        label: '開始局面',
+      }]);
+      setMateStrategyChoices([]);
+      setMateKifuDialogOpen(false);
+      setStorageStatus(`完全応手 DAG を読み込みました: ${replay.nodes.size} 局面`);
+    } catch (error) {
+      setStorageStatus(extractErrorMessage(error, 'strategy.json を読み込めませんでした。'));
+    }
+  }, [exitAnalysisMode, mateStrategyText]);
+
+  const chooseMateStrategyEdge = useCallback((edge: MateStrategyEdge) => {
+    if (!mateStrategy || !mateStrategyCurrentStep) return;
+    try {
+      const label = strategyEdgeLabel(edge, mateStrategyCurrentStep.snapshot);
+      const snapshot = applyStrategyEdge(mateStrategy, mateStrategyCurrentStep.snapshot, edge);
+      const deckCounts = applyStrategyDeckCounts(mateStrategyCurrentStep.deckCounts, edge);
+      setMateStrategySteps((prev) => [...prev, { nodeId: edge.child, snapshot, deckCounts, label }]);
+      setMateStrategyChoices([]);
+      setStorageStatus(`応手を進めました: ${label}`);
+    } catch (error) {
+      setStorageStatus(extractErrorMessage(error, '応手を反映できませんでした。'));
+    }
+  }, [mateStrategy, mateStrategyCurrentStep]);
+
+  const chooseMateStrategyBoardTarget = useCallback((target: { kind: 'card'; cardId: number } | { kind: 'deck'; level: number } | { kind: 'noble'; nobleId: number }) => {
+    const matches = mateStrategyOutgoing.filter((edge) => edgeMatchesBoardTarget(edge, target));
+    if (matches.length === 1) {
+      chooseMateStrategyEdge(matches[0]);
+      return;
+    }
+    setMateStrategyChoices(matches);
+    setStorageStatus(matches.length > 1 ? '候補が複数あります。応手一覧から選択してください。' : 'その操作は証明 DAG の応手にありません。');
+  }, [chooseMateStrategyEdge, mateStrategyOutgoing]);
+
+  const advanceMateStrategy = useCallback(() => {
+    if (mateStrategyOutgoing.length > 0) chooseMateStrategyEdge(mateStrategyOutgoing[0]);
+  }, [chooseMateStrategyEdge, mateStrategyOutgoing]);
+
+  const undoMateStrategy = useCallback(() => {
+    setMateStrategySteps((prev) => prev.length > 1 ? prev.slice(0, -1) : prev);
+    setMateStrategyChoices([]);
+  }, []);
+
   const closeMateReplay = useCallback(() => {
     setMateReplay(null);
     setMateReplayStep(0);
+    setMateStrategy(null);
+    setMateStrategySteps([]);
+    setMateStrategyChoices([]);
     setStorageStatus('詰み手順の再生を終了しました。');
   }, []);
 
@@ -2042,6 +2131,13 @@ export default function PositionEditorClient({
               詰み手順再生中 / {mateReplayStep} / {mateReplay.moves.length} 手 / 結果: {mateReplay.result || '未記載'}
             </div>
           )}
+          {mateStrategy && mateStrategyCurrentNode && (
+            <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900">
+              完全応手 DAG 再生中 / {mateStrategyMode === 'auto' ? '自動再生' : '応手選択'} /
+              {' '}手数 {Math.max(0, mateStrategySteps.length - 1)} / ノード {mateStrategyCurrentNode.id} /
+              {' '}候補 {mateStrategyOutgoing.length}
+            </div>
+          )}
 
           {bankErrors.length > 0 && (
             <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 space-y-1">
@@ -2060,12 +2156,24 @@ export default function PositionEditorClient({
               boardNobleSlots={activeSnapshot.boardNobles}
               playerNobleSlots={activeSnapshot.playerNobles}
               enableCardAnnotations
-              onNobleClick={pendingNobleChoice ? (nobleId) => selectAnalysisNoble(nobleId) : undefined}
+              onNobleClick={pendingNobleChoice
+                ? (nobleId) => selectAnalysisNoble(nobleId)
+                : (isMateStrategyActive && mateStrategyMode === 'select'
+                  ? (nobleId) => chooseMateStrategyBoardTarget({ kind: 'noble', nobleId })
+                  : undefined)}
               eligibleNobleIds={pendingNobleChoice?.eligibleIds ?? []}
               onBoardNobleSlotClick={!isAnalysisActive && !isMateReplayActive ? openBoardNoblePicker : undefined}
               onVisibleSlotClick={!isAnalysisActive && !isMateReplayActive ? ((level, slot) => openVisiblePicker(level, slot)) : undefined}
-              onCardClick={isAnalysisActive && !analysisBoardLocked ? (cardId) => selectAnalysisCardForAction(cardId, 'visible') : undefined}
-              onDeckClick={isAnalysisActive && !analysisBoardLocked ? (level) => selectAnalysisDeckForAction(level as Tier) : undefined}
+              onCardClick={isAnalysisActive && !analysisBoardLocked
+                ? (cardId) => selectAnalysisCardForAction(cardId, 'visible')
+                : (isMateStrategyActive && mateStrategyMode === 'select'
+                  ? (cardId) => chooseMateStrategyBoardTarget({ kind: 'card', cardId })
+                  : undefined)}
+              onDeckClick={isAnalysisActive && !analysisBoardLocked
+                ? (level) => selectAnalysisDeckForAction(level as Tier)
+                : (isMateStrategyActive && mateStrategyMode === 'select'
+                  ? (level) => chooseMateStrategyBoardTarget({ kind: 'deck', level })
+                  : undefined)}
               onGemClick={isAnalysisActive && !analysisBoardLocked ? handleAnalysisBankGemClick : undefined}
               onPlayerGemClick={!isAnalysisActive && !isMateReplayActive ? ((player, gem) => openGemEditor(player, gem)) : undefined}
               onPlayerNobleSlotClick={!isAnalysisActive && !isMateReplayActive ? ((player, slot) => openPlayerNoblePicker(player, slot)) : undefined}
@@ -2074,11 +2182,13 @@ export default function PositionEditorClient({
               onReservedCardClick={
                 isAnalysisActive
                   ? (analysisBoardLocked ? undefined : (cardId) => selectAnalysisCardForAction(cardId, 'reserved'))
-                  : (isMateReplayActive ? undefined : ((cardId) => {
+                  : (isMateStrategyActive && mateStrategyMode === 'select'
+                    ? (cardId) => chooseMateStrategyBoardTarget({ kind: 'card', cardId })
+                    : (isMateReplayActive ? undefined : ((cardId) => {
                     const slot = findReservedCardSlot(cardId);
                     if (!slot) return;
                     openReservedPicker(slot.player, slot.slot);
-                  }))
+                  })))
               }
               publicReservedCardIds={[...displayState.players[1].reserved_cards]}
               allowOpponentReservedCardClick
@@ -2171,6 +2281,82 @@ export default function PositionEditorClient({
                   >
                     {index + 1}. P{move.player} {move.usi}{move.comment ? ` # ${move.comment}` : ''}
                   </button>
+                ))}
+              </div>
+            </section>
+          )}
+          {mateStrategy && mateStrategyCurrentNode && (
+            <section className="bg-white border border-violet-200 rounded-3xl p-5 space-y-4 shadow-2xl shadow-black/10">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="font-black text-slate-900 text-xl">完全応手 DAG</h2>
+                <button
+                  onClick={closeMateReplay}
+                  className="px-3 py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-bold"
+                >
+                  再生終了
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => {
+                    setMateStrategyMode('auto');
+                    setMateStrategyChoices([]);
+                  }}
+                  className={`px-3 py-2 rounded-xl text-xs font-bold ${mateStrategyMode === 'auto' ? 'bg-violet-600 text-white' : 'border border-slate-200 text-slate-700'}`}
+                >
+                  自動再生
+                </button>
+                <button
+                  onClick={() => {
+                    setMateStrategyMode('select');
+                    setMateStrategyChoices([]);
+                  }}
+                  className={`px-3 py-2 rounded-xl text-xs font-bold ${mateStrategyMode === 'select' ? 'bg-violet-600 text-white' : 'border border-slate-200 text-slate-700'}`}
+                >
+                  応手選択
+                </button>
+                <button
+                  onClick={undoMateStrategy}
+                  disabled={mateStrategySteps.length <= 1}
+                  className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold disabled:opacity-40"
+                >
+                  <ChevronLeft size={14} className="inline mr-1" />
+                  1手戻す
+                </button>
+                <button
+                  onClick={advanceMateStrategy}
+                  disabled={mateStrategyMode !== 'auto' || mateStrategyOutgoing.length === 0}
+                  className="px-3 py-2 rounded-xl bg-violet-600 text-white text-xs font-bold disabled:opacity-40"
+                >
+                  1手進める
+                  <ChevronRight size={14} className="inline ml-1" />
+                </button>
+              </div>
+              <div className="text-xs text-slate-600">
+                ノード {mateStrategyCurrentNode.id} / 手番 P{mateStrategyCurrentNode.player} /
+                {' '}depth {mateStrategyCurrentNode.depth} / 候補 {mateStrategyOutgoing.length}
+              </div>
+              {mateStrategyMode === 'select' && (
+                <div className="space-y-2 max-h-72 overflow-y-auto border border-slate-100 rounded-xl p-2">
+                  {(mateStrategyChoices.length > 0 ? mateStrategyChoices : mateStrategyOutgoing).map((edge, index) => (
+                    <button
+                      key={`${edge.child}-${edge.actionCode}-${edge.oracleCard}-${edge.oracleReserveCard}-${index}`}
+                      onClick={() => chooseMateStrategyEdge(edge)}
+                      className="block w-full text-left px-2 py-1.5 rounded-lg border border-slate-100 bg-slate-50 hover:bg-violet-50 text-xs font-mono text-slate-700"
+                    >
+                      {strategyEdgeLabel(edge, mateStrategyCurrentStep?.snapshot ?? activeSnapshot)} → node {edge.child}
+                    </button>
+                  ))}
+                  {mateStrategyOutgoing.length === 0 && (
+                    <div className="px-2 py-1 text-xs text-slate-400">終端局面です。</div>
+                  )}
+                </div>
+              )}
+              <div className="space-y-1 max-h-48 overflow-y-auto border border-slate-100 rounded-xl p-2">
+                {mateStrategySteps.map((step, index) => (
+                  <div key={`${step.nodeId}-${index}`} className="px-2 py-1 text-xs font-mono text-slate-700">
+                    {index}. {step.label} → node {step.nodeId}
+                  </div>
                 ))}
               </div>
             </section>
@@ -2314,9 +2500,9 @@ export default function PositionEditorClient({
           >
             <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-4">
               <div>
-                <h3 className="font-black text-slate-900 text-lg">詰み手順棋譜の読み込み</h3>
+                <h3 className="font-black text-slate-900 text-lg">詰み手順データの読み込み</h3>
                 <p className="text-xs text-slate-500 mt-1">
-                  `dfpn_mate_solver.py --kifu-output` で生成した KIFU テキストを貼り付けてください。
+                  代表手順の KIFU、または問題集の `strategy.json` を読み込めます。
                 </p>
               </div>
               <button
@@ -2328,6 +2514,38 @@ export default function PositionEditorClient({
               </button>
             </div>
             <div className="px-5 py-5 space-y-4">
+              <div className="space-y-2">
+                <div className="text-sm font-bold text-slate-800">完全応手 DAG (`strategy.json`)</div>
+                <input
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (!file) return;
+                    void file.text().then(setMateStrategyText).catch((error: unknown) => {
+                      setStorageStatus(extractErrorMessage(error, 'strategy.json を読み込めませんでした。'));
+                    });
+                  }}
+                  className="block w-full text-xs text-slate-600 file:mr-3 file:px-3 file:py-2 file:rounded-xl file:border-0 file:bg-violet-100 file:text-violet-800 file:font-bold"
+                />
+                <textarea
+                  value={mateStrategyText}
+                  onChange={(event) => setMateStrategyText(event.target.value)}
+                  className="w-full min-h-36 px-4 py-3 rounded-2xl border border-slate-200 text-xs font-mono"
+                  placeholder={'{"format":"csplendor_mate_strategy_v1", ...}'}
+                />
+                <div className="flex justify-end">
+                  <button
+                    onClick={loadMateStrategy}
+                    disabled={!mateStrategyText.trim()}
+                    className="px-4 py-2 rounded-xl bg-violet-600 text-white font-bold text-sm hover:bg-violet-700 disabled:opacity-40"
+                  >
+                    strategy.json を読み込む
+                  </button>
+                </div>
+              </div>
+              <div className="border-t border-slate-200 pt-4 space-y-2">
+                <div className="text-sm font-bold text-slate-800">代表手順 KIFU</div>
               <textarea
                 value={mateKifuText}
                 onChange={(event) => setMateKifuText(event.target.value)}
@@ -2343,6 +2561,7 @@ export default function PositionEditorClient({
                 >
                   読み込む
                 </button>
+              </div>
               </div>
             </div>
           </div>

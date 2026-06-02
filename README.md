@@ -48,6 +48,7 @@ gcloud run deploy lisplendor \
 
 ## 詰み手順の再生
 
-`csplendor/scripts/dfpn_mate_solver.py --kifu-output mate.kifu` で出力した棋譜を、
-画面上部の `詰み手順読込` から読み込めます。公開カード補充を含む手順では、
-棋譜コメントの `reveal:C<id>` 注釈を使ってめくれカードを再現します。
+`csplendor/scripts/dfpn_mate_solver.py --kifu-output mate.kifu` で出力した代表棋譜と、
+`generate_mate_puzzles.py` が保存した `strategy.json` を画面上部の `詰み手順読込` から読み込めます。
+KIFU の公開カード補充は `reveal:C<id>` 注釈で再現します。`strategy.json` では
+`自動再生` と `応手選択` を切り替えられ、完全応手 DAG 内の変化を盤面操作または候補一覧から確認できます。

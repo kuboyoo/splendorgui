@@ -67,6 +67,20 @@ function parseIds(token: string, expectedLength?: number): number[] {
   return values;
 }
 
+function parseReservedIds(token: string): number[] {
+  const match = token.trim().match(/^\[([^\]]*)\]$/u);
+  if (!match) throw new Error(`予約カード一覧が不正です: ${token}`);
+  return match[1].trim()
+    ? match[1].split(',').map((value) => {
+      const trimmed = value.trim();
+      if (trimmed === '-') return -1;
+      const card = trimmed.match(/^\??C?(\d+)$/u);
+      if (!card) throw new Error(`予約カードIDが不正です: ${value}`);
+      return Number.parseInt(card[1], 10);
+    })
+    : [];
+}
+
 function parseVisible(token: string): number[][] {
   const levels: number[][] = [];
   const body = token.replace(/^visible:/u, '');
@@ -89,7 +103,7 @@ function parsePlayer(token: string, player: 0 | 1) {
   const gems = parseCounts(fields.get('gems') ?? '', 6) as PaymentVec;
   const bonuses = parseCounts(fields.get('bonuses') ?? '', 5) as BonusVec;
   const nobles = parseIds(fields.get('nobles') ?? '[]').filter((id) => id >= 0);
-  const reserved = parseIds(fields.get('reserved') ?? '[]').filter((id) => id >= 0);
+  const reserved = parseReservedIds(fields.get('reserved') ?? '[]').filter((id) => id >= 0);
   return {
     name: fields.get('name')?.trim() || `Player${player}`,
     gems,
@@ -137,7 +151,7 @@ function revealCard(comment: string): number | null {
   return match ? Number.parseInt(match[1], 10) : null;
 }
 
-function applyMove(snapshot: PositionSnapshot, move: MateKifuMove, nextPlayer: 0 | 1): PositionSnapshot {
+export function applyMateMove(snapshot: PositionSnapshot, move: MateKifuMove, nextPlayer: 0 | 1): PositionSnapshot {
   const next = cloneSnapshot(snapshot);
   const player = move.player;
   next.currentPlayer = player;
@@ -228,7 +242,7 @@ export function parseMateKifu(text: string): MateKifuReplay {
   const snapshots = [parsePositionSnapshot(position)];
   moves.forEach((move, index) => {
     const nextPlayer = moves[index + 1]?.player ?? (move.player === 0 ? 1 : 0);
-    snapshots.push(applyMove(snapshots[snapshots.length - 1], move, nextPlayer));
+    snapshots.push(applyMateMove(snapshots[snapshots.length - 1], move, nextPlayer));
   });
   return { headers, result, moves, snapshots };
 }
