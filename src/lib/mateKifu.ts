@@ -81,6 +81,20 @@ function parseReservedIds(token: string): number[] {
     : [];
 }
 
+function parseBoughtIds(token: string): number[] {
+  const match = token.trim().match(/^\[([^\]]*)\]$/u);
+  if (!match) throw new Error(`購入済みカード一覧が不正です: ${token}`);
+  return match[1].trim()
+    ? match[1].split(',').flatMap((value) => {
+      const trimmed = value.trim();
+      if (!trimmed || trimmed === '_' || trimmed === '-') return [];
+      const cardId = Number.parseInt(trimmed, 10);
+      if (!Number.isFinite(cardId) || cardId < 0) throw new Error(`購入済みカードIDが不正です: ${value}`);
+      return [cardId];
+    })
+    : [];
+}
+
 function parseVisible(token: string): number[][] {
   const levels: number[][] = [];
   const body = token.replace(/^visible:/u, '');
@@ -104,6 +118,7 @@ function parsePlayer(token: string, player: 0 | 1) {
   const bonuses = parseCounts(fields.get('bonuses') ?? '', 5) as BonusVec;
   const nobles = parseIds(fields.get('nobles') ?? '[]').filter((id) => id >= 0);
   const reserved = parseReservedIds(fields.get('reserved') ?? '[]').filter((id) => id >= 0);
+  const bought = parseBoughtIds(fields.get('bought') ?? '[]');
   return {
     name: fields.get('name')?.trim() || `Player${player}`,
     gems,
@@ -111,6 +126,7 @@ function parsePlayer(token: string, player: 0 | 1) {
     points: Number.parseInt(fields.get('points') ?? '0', 10),
     nobles: [...nobles, -1, -1, -1].slice(0, 3) as NobleSlots,
     reserved: [...reserved, -1, -1, -1].slice(0, 3),
+    bought,
   };
 }
 
@@ -125,6 +141,7 @@ export function parsePositionSnapshot(spn: string): PositionSnapshot {
   snapshot.reservedCards = [[...players[0].reserved], [...players[1].reserved]];
   snapshot.playerNobles = [[...players[0].nobles] as NobleSlots, [...players[1].nobles] as NobleSlots];
   snapshot.purchasedCounts = [[...players[0].bonuses] as BonusVec, [...players[1].bonuses] as BonusVec];
+  snapshot.purchasedCardIds = [[...players[0].bought], [...players[1].bought]];
   snapshot.playerGems = [[...players[0].gems] as PaymentVec, [...players[1].gems] as PaymentVec];
   snapshot.playerPoints = [players[0].points, players[1].points];
   snapshot.playerNames = [players[0].name, players[1].name];
@@ -196,6 +213,7 @@ export function applyMateMove(snapshot: PositionSnapshot, move: MateKifuMove, ne
       else if (visible) next.visibleCards[visible.level][visible.slot] = reveal ?? -1;
       else throw new Error(`購入対象 C${cardId} が見つかりません。`);
       next.purchasedCounts[player][card.bonus as 0 | 1 | 2 | 3 | 4] += 1;
+      next.purchasedCardIds[player].push(cardId);
       next.playerPoints[player] += card.points;
     } else if (noble) {
       const nobleId = Number.parseInt(noble[1], 10);

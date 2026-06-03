@@ -15,6 +15,7 @@ export interface PositionSnapshot {
   reservedCards: [number[], number[]];
   playerNobles: [NobleSlots, NobleSlots];
   purchasedCounts: [BonusVec, BonusVec];
+  purchasedCardIds: [number[], number[]];
   playerGems: [PaymentVec, PaymentVec];
   playerPoints: [number, number];
   playerNames: [string, string];
@@ -59,6 +60,7 @@ export function buildEmptySnapshot(): PositionSnapshot {
       [-1, -1, -1],
     ],
     purchasedCounts: [zeroBonuses(), zeroBonuses()],
+    purchasedCardIds: [[], []],
     playerGems: [zeroGems(), zeroGems()],
     playerPoints: [0, 0],
     playerNames: [...DEFAULT_PLAYER_NAMES],
@@ -160,6 +162,8 @@ export function sanitizeSnapshot(raw: unknown): PositionSnapshot {
       playerNobles?: unknown;
       acquiredNobles?: unknown;
       purchasedCounts?: unknown;
+      purchasedCardIds?: unknown;
+      boughtCardIds?: unknown;
       playerBonuses?: unknown;
       playerGems?: unknown;
       playerPoints?: unknown;
@@ -173,6 +177,7 @@ export function sanitizeSnapshot(raw: unknown): PositionSnapshot {
   const reservedSource = Array.isArray(source.reservedCards) ? source.reservedCards : [];
   const playerNoblesSource = source.playerNobles ?? source.acquiredNobles;
   const purchasedSource = source.purchasedCounts ?? source.playerBonuses;
+  const purchasedCardIdsSource = source.purchasedCardIds ?? source.boughtCardIds;
   const playerGemsSource = Array.isArray(source.playerGems) ? source.playerGems : [];
 
   return {
@@ -193,6 +198,10 @@ export function sanitizeSnapshot(raw: unknown): PositionSnapshot {
     purchasedCounts: [
       normalizeBonusVec(Array.isArray(purchasedSource) ? purchasedSource[0] : undefined),
       normalizeBonusVec(Array.isArray(purchasedSource) ? purchasedSource[1] : undefined),
+    ],
+    purchasedCardIds: [
+      normalizeCardRow(Array.isArray(purchasedCardIdsSource) ? purchasedCardIdsSource[0] : undefined, 90).filter((cardId) => cardId >= 0),
+      normalizeCardRow(Array.isArray(purchasedCardIdsSource) ? purchasedCardIdsSource[1] : undefined, 90).filter((cardId) => cardId >= 0),
     ],
     playerGems: [
       normalizePaymentVec(playerGemsSource[0]),

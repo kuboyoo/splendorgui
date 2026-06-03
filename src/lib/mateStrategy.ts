@@ -161,6 +161,7 @@ function applyOracleEdge(snapshot: PositionSnapshot, edge: MateStrategyEdge, nex
     const payment = oraclePayment(edge, next);
     next.playerGems[player] = next.playerGems[player].map((value, index) => value - payment[index]) as PaymentVec;
     next.purchasedCounts[player][card.bonus as 0 | 1 | 2 | 3 | 4] += 1;
+    next.purchasedCardIds[player].push(edge.oracleCard);
     next.playerPoints[player] += card.points;
   }
   next.currentPlayer = nextPlayer;

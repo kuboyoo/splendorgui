@@ -126,6 +126,7 @@ type PositionEditorClientProps = {
 
 const DEFAULT_BANK: PaymentVec = [4, 4, 4, 4, 4, 5];
 const GEM_LABELS = ['白', '青', '緑', '赤', '黒', '金'] as const;
+const CARD_BY_ID = new Map(CARDS.map((card) => [card.id, card] as const));
 
 function zeroGems(): PaymentVec {
   return [0, 0, 0, 0, 0, 0];
@@ -234,6 +235,10 @@ function cloneSnapshot(snapshot: PositionSnapshot): PositionSnapshot {
     purchasedCounts: [
       [...snapshot.purchasedCounts[0]] as BonusVec,
       [...snapshot.purchasedCounts[1]] as BonusVec,
+    ],
+    purchasedCardIds: [
+      [...snapshot.purchasedCardIds[0]],
+      [...snapshot.purchasedCardIds[1]],
     ],
     playerGems: [
       [...snapshot.playerGems[0]] as PaymentVec,
@@ -491,9 +496,23 @@ function buildBlankPurchasedCards(player: PlayerIndex, counts: BonusVec): CardDa
   return cards;
 }
 
-function buildBoughtBlanks(counts: BonusVec): string {
+function buildPurchasedCards(player: PlayerIndex, counts: BonusVec, cardIds: number[]): CardData[] {
+  const cards = cardIds.flatMap((cardId) => {
+    const card = CARD_BY_ID.get(cardId);
+    return card ? [card] : [];
+  });
+  const remaining = [...counts] as BonusVec;
+  cards.forEach((card) => {
+    remaining[card.bonus as BonusColor] = Math.max(0, remaining[card.bonus as BonusColor] - 1);
+  });
+  return [...cards, ...buildBlankPurchasedCards(player, remaining)];
+}
+
+function formatBought(counts: BonusVec, cardIds: number[]): string {
   const total = counts.reduce((sum, value) => sum + value, 0);
-  return Array.from({ length: total }, () => '_').join(',');
+  const known = cardIds.filter((cardId) => cardId >= 0).map((cardId) => String(cardId));
+  const unknown = Array.from({ length: Math.max(0, total - known.length) }, () => '_');
+  return [...known, ...unknown].join(',');
 }
 
 function formatSlotIds(ids: number[]): string {
@@ -531,6 +550,10 @@ export default function PositionEditorClient({
   const [purchasedCounts, setPurchasedCounts] = useState<[BonusVec, BonusVec]>([
     [...initialEditorData.snapshot.purchasedCounts[0]] as BonusVec,
     [...initialEditorData.snapshot.purchasedCounts[1]] as BonusVec,
+  ]);
+  const [purchasedCardIds, setPurchasedCardIds] = useState<[number[], number[]]>([
+    [...initialEditorData.snapshot.purchasedCardIds[0]],
+    [...initialEditorData.snapshot.purchasedCardIds[1]],
   ]);
   const [playerGems, setPlayerGems] = useState<[PaymentVec, PaymentVec]>([
     [...initialEditorData.snapshot.playerGems[0]] as PaymentVec,
@@ -611,6 +634,10 @@ export default function PositionEditorClient({
       [...purchasedCounts[0]] as BonusVec,
       [...purchasedCounts[1]] as BonusVec,
     ],
+    purchasedCardIds: [
+      [...purchasedCardIds[0]],
+      [...purchasedCardIds[1]],
+    ],
     playerGems: [
       [...playerGems[0]] as PaymentVec,
       [...playerGems[1]] as PaymentVec,
@@ -619,7 +646,7 @@ export default function PositionEditorClient({
     playerNames: [...playerNames] as [string, string],
     currentPlayer,
     annotationArrows: annotationArrows.map((arrow) => ({ ...arrow })),
-  }), [annotationArrows, boardNobles, currentPlayer, playerGems, playerNames, playerNobles, playerPoints, purchasedCounts, reservedCards, visibleCards]);
+  }), [annotationArrows, boardNobles, currentPlayer, playerGems, playerNames, playerNobles, playerPoints, purchasedCardIds, purchasedCounts, reservedCards, visibleCards]);
 
   const activeSnapshot = useMemo<PositionSnapshot>(() => {
     const source = mateStrategySteps.at(-1)?.snapshot ?? mateReplay?.snapshots[mateReplayStep] ?? analysisPosition?.snapshot ?? editorSnapshot;
@@ -663,8 +690,8 @@ export default function PositionEditorClient({
   }, [bank]);
 
   const purchasedCardOverrides = useMemo<[CardData[], CardData[]]>(() => ([
-    buildBlankPurchasedCards(0, activeSnapshot.purchasedCounts[0]),
-    buildBlankPurchasedCards(1, activeSnapshot.purchasedCounts[1]),
+    buildPurchasedCards(0, activeSnapshot.purchasedCounts[0], activeSnapshot.purchasedCardIds[0]),
+    buildPurchasedCards(1, activeSnapshot.purchasedCounts[1], activeSnapshot.purchasedCardIds[1]),
   ]), [activeSnapshot]);
 
   const displayState = useMemo<GameState>(() => ({
@@ -767,8 +794,8 @@ export default function PositionEditorClient({
       `visible:L1[${l1}]L2[${l2}]L3[${l3}]`,
       `decks:${activeDeckCounts.join(',')}`,
       `nobles:[${formatSlotIds(currentSnapshot.boardNobles)}]`,
-      `P0:name:${currentSnapshot.playerNames[0]};gems:${countsToGemToken(currentSnapshot.playerGems[0])};bonuses:${countsToBonusToken(currentSnapshot.purchasedCounts[0])};points:${currentSnapshot.playerPoints[0]};nobles:[${formatSlotIds(currentSnapshot.playerNobles[0])}];reserved:[${reserved0}];bought:[${buildBoughtBlanks(currentSnapshot.purchasedCounts[0])}]`,
-      `P1:name:${currentSnapshot.playerNames[1]};gems:${countsToGemToken(currentSnapshot.playerGems[1])};bonuses:${countsToBonusToken(currentSnapshot.purchasedCounts[1])};points:${currentSnapshot.playerPoints[1]};nobles:[${formatSlotIds(currentSnapshot.playerNobles[1])}];reserved:[${reserved1}];bought:[${buildBoughtBlanks(currentSnapshot.purchasedCounts[1])}]`,
+      `P0:name:${currentSnapshot.playerNames[0]};gems:${countsToGemToken(currentSnapshot.playerGems[0])};bonuses:${countsToBonusToken(currentSnapshot.purchasedCounts[0])};points:${currentSnapshot.playerPoints[0]};nobles:[${formatSlotIds(currentSnapshot.playerNobles[0])}];reserved:[${reserved0}];bought:[${formatBought(currentSnapshot.purchasedCounts[0], currentSnapshot.purchasedCardIds[0])}]`,
+      `P1:name:${currentSnapshot.playerNames[1]};gems:${countsToGemToken(currentSnapshot.playerGems[1])};bonuses:${countsToBonusToken(currentSnapshot.purchasedCounts[1])};points:${currentSnapshot.playerPoints[1]};nobles:[${formatSlotIds(currentSnapshot.playerNobles[1])}];reserved:[${reserved1}];bought:[${formatBought(currentSnapshot.purchasedCounts[1], currentSnapshot.purchasedCardIds[1])}]`,
       `${currentSnapshot.currentPlayer}`,
     ].join(' | ');
   }, [activeDeckCounts, bank, currentSnapshot]);
@@ -1075,6 +1102,7 @@ export default function PositionEditorClient({
     }
 
     next.snapshot.purchasedCounts[player][card.bonus as BonusColor] += 1;
+    next.snapshot.purchasedCardIds[player].push(cardId);
     next.snapshot.playerPoints[player] += card.points;
     if (!next.blockedCardIds.includes(cardId)) {
       next.blockedCardIds.push(cardId);
@@ -1554,6 +1582,10 @@ export default function PositionEditorClient({
       [...sanitized.purchasedCounts[0]] as BonusVec,
       [...sanitized.purchasedCounts[1]] as BonusVec,
     ]);
+    setPurchasedCardIds([
+      [...sanitized.purchasedCardIds[0]],
+      [...sanitized.purchasedCardIds[1]],
+    ]);
     setPlayerGems([
       [...sanitized.playerGems[0]] as PaymentVec,
       [...sanitized.playerGems[1]] as PaymentVec,
@@ -1698,6 +1730,10 @@ export default function PositionEditorClient({
         [...DEFAULT_SNAPSHOT.purchasedCounts[0]] as BonusVec,
         [...DEFAULT_SNAPSHOT.purchasedCounts[1]] as BonusVec,
       ],
+      purchasedCardIds: [
+        [...DEFAULT_SNAPSHOT.purchasedCardIds[0]],
+        [...DEFAULT_SNAPSHOT.purchasedCardIds[1]],
+      ],
       playerGems: [
         [...DEFAULT_SNAPSHOT.playerGems[0]] as PaymentVec,
         [...DEFAULT_SNAPSHOT.playerGems[1]] as PaymentVec,
@@ -1828,6 +1864,11 @@ export default function PositionEditorClient({
         [...prev[1]] as BonusVec,
       ];
       next[player][bonusIndex] = parsed;
+      return next;
+    });
+    setPurchasedCardIds((prev) => {
+      const next: [number[], number[]] = [[...prev[0]], [...prev[1]]];
+      next[player] = [];
       return next;
     });
   };

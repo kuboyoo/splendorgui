@@ -52,3 +52,5 @@ gcloud run deploy lisplendor \
 `generate_mate_puzzles.py` が保存した `strategy.json` を画面上部の `詰み手順読込` から読み込めます。
 KIFU の公開カード補充は `reveal:C<id>` 注釈で再現します。`strategy.json` では
 `自動再生` と `応手選択` を切り替えられ、完全応手 DAG 内の変化を盤面操作または候補一覧から確認できます。
+SPN に `bought:[<id>,...]` と player section の `nobles:[<id>,...]` が含まれる場合、
+初期局面および再生中の購入済みカード・取得済み貴族として表示します。
