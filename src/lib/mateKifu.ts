@@ -163,6 +163,28 @@ function findVisible(snapshot: PositionSnapshot, cardId: number): { level: numbe
   return null;
 }
 
+function canClaimNoble(snapshot: PositionSnapshot, player: 0 | 1, nobleId: number): boolean {
+  const noble = nobleById.get(nobleId);
+  return !!noble && noble.requirement.every((amount, index) => snapshot.purchasedCounts[player][index] >= amount);
+}
+
+function awardNoble(snapshot: PositionSnapshot, player: 0 | 1, nobleId: number): boolean {
+  const noble = nobleById.get(nobleId);
+  const boardSlot = snapshot.boardNobles.indexOf(nobleId);
+  const playerSlot = snapshot.playerNobles[player].indexOf(-1);
+  if (!noble || boardSlot < 0 || playerSlot < 0) return false;
+  snapshot.boardNobles[boardSlot] = -1;
+  snapshot.playerNobles[player][playerSlot] = nobleId;
+  snapshot.playerPoints[player] += noble.points;
+  return true;
+}
+
+function awardAutomaticNobleIfResolved(snapshot: PositionSnapshot, player: 0 | 1, nextPlayer: 0 | 1): void {
+  if (nextPlayer === player) return;
+  const eligible = snapshot.boardNobles.filter((nobleId) => nobleId >= 0 && canClaimNoble(snapshot, player, nobleId));
+  if (eligible.length === 1) awardNoble(snapshot, player, eligible[0]);
+}
+
 function revealCard(comment: string): number | null {
   const match = comment.match(/(?:^|\s)reveal:C(\d+)(?:\s|$)/u);
   return match ? Number.parseInt(match[1], 10) : null;
@@ -215,15 +237,10 @@ export function applyMateMove(snapshot: PositionSnapshot, move: MateKifuMove, ne
       next.purchasedCounts[player][card.bonus as 0 | 1 | 2 | 3 | 4] += 1;
       next.purchasedCardIds[player].push(cardId);
       next.playerPoints[player] += card.points;
+      awardAutomaticNobleIfResolved(next, player, nextPlayer);
     } else if (noble) {
       const nobleId = Number.parseInt(noble[1], 10);
-      const nobleData = nobleById.get(nobleId);
-      const boardSlot = next.boardNobles.indexOf(nobleId);
-      const playerSlot = next.playerNobles[player].indexOf(-1);
-      if (!nobleData || boardSlot < 0 || playerSlot < 0) throw new Error(`貴族 N${nobleId} を反映できません。`);
-      next.boardNobles[boardSlot] = -1;
-      next.playerNobles[player][playerSlot] = nobleId;
-      next.playerPoints[player] += nobleData.points;
+      if (!awardNoble(next, player, nobleId)) throw new Error(`貴族 N${nobleId} を反映できません。`);
     } else if (move.usi !== 'pass') {
       throw new Error(`未対応の指し手です: ${move.usi}`);
     }
