@@ -7,6 +7,7 @@ type PlayerIndex = 0 | 1;
 export interface MateStrategyEdge {
   actionCode: number;
   revealCard: number | null;
+  revealCards?: number[];
   oracleCard: number | null;
   oracleReserve: boolean;
   oracleReserveCard: number | null;
@@ -51,6 +52,11 @@ function integer(value: unknown, fallback = -1): number {
 function nullableInteger(value: unknown): number | null {
   const parsed = integer(value);
   return parsed >= 0 ? parsed : null;
+}
+
+function optionalInteger(value: unknown): number | null {
+  const parsed = integer(value);
+  return parsed < 0 ? null : parsed;
 }
 
 function asObject(value: unknown, message: string): Record<string, unknown> {
@@ -115,6 +121,10 @@ function returnSuffix(values: number[]): string {
   return letters ? `/return:${letters}` : '';
 }
 
+function edgeRevealCard(edge: MateStrategyEdge): number | null {
+  return edge.revealCard ?? edge.revealCards?.[0] ?? null;
+}
+
 export function strategyEdgeLabel(edge: MateStrategyEdge, snapshot: PositionSnapshot): string {
   if (edge.oracleReserve) return `oracle reserve:C${edge.oracleReserveCard ?? '?'}${edge.oracleReturnColor === null ? '' : `/return:${LETTERS[edge.oracleReturnColor]}`}`;
   if (edge.oracleCard !== null) return `oracle buy:C${edge.oracleCard}/pay:${oraclePayment(edge, snapshot).map((value, index) => `${LETTERS[index]}${value}`).join('')}`;
@@ -176,7 +186,7 @@ export function applyStrategyEdge(replay: MateStrategyReplay, snapshot: Position
   const move: MateKifuMove = {
     player: snapshot.currentPlayer,
     usi: strategyEdgeLabel(edge, snapshot),
-    comment: edge.revealCard === null ? '' : `reveal:C${edge.revealCard}`,
+    comment: edgeRevealCard(edge) === null ? '' : `reveal:C${edgeRevealCard(edge)}`,
   };
   if (action.type < 0 || action.type > 5) throw new Error('未対応の action_code です。');
   return applyMateMove(snapshot, move, child.player);
@@ -205,36 +215,105 @@ export function edgeMatchesBoardTarget(edge: MateStrategyEdge, target: { kind: '
   return action.type === 5 && action.nobleId === target.nobleId;
 }
 
+function decodeCardMaskHex(maskHex: string): number[] {
+  const cards: number[] = [];
+  for (let byteIndex = 0; byteIndex < Math.floor(maskHex.length / 2); byteIndex += 1) {
+    const byte = Number.parseInt(maskHex.slice(byteIndex * 2, byteIndex * 2 + 2), 16);
+    if (!Number.isFinite(byte)) continue;
+    for (let bit = 0; bit < 8; bit += 1) {
+      const card = byteIndex * 8 + bit;
+      if (card < 90 && (byte & (1 << bit)) !== 0) cards.push(card);
+    }
+  }
+  return cards;
+}
+
+function parseCompactStrategyDag(dag: Record<string, unknown>): Map<number, MateStrategyNode> {
+  if (dag.reveal_group_encoding !== 'card_bitset_le_hex_v1') throw new Error('未対応の compact reveal group 形式です。');
+  const kindStrings = Array.isArray(dag.kind_strings) ? dag.kind_strings.map(String) : [];
+  const resolutionStrings = Array.isArray(dag.resolution_strings) ? dag.resolution_strings.map(String) : [];
+  const actionTemplates = Array.isArray(dag.action_templates) ? dag.action_templates : [];
+  const revealGroups = Array.isArray(dag.reveal_groups) ? dag.reveal_groups.map(String) : [];
+  const edgeRows = Array.isArray(dag.edges) ? dag.edges : [];
+  const nodes = new Map<number, MateStrategyNode>();
+  const edgeCache = new Map<number, MateStrategyEdge[]>();
+
+  const edgeAt = (index: number): MateStrategyEdge => {
+    const rawEdge = Array.isArray(edgeRows[index]) ? edgeRows[index] : [];
+    const actionIndex = integer(rawEdge[0], 0);
+    const revealGroupIndex = integer(rawEdge[1], -1);
+    const rawAction = Array.isArray(actionTemplates[actionIndex]) ? actionTemplates[actionIndex] : [];
+    const revealCards = revealGroupIndex >= 0 ? decodeCardMaskHex(revealGroups[revealGroupIndex] ?? '') : [];
+    return {
+      actionCode: integer(rawAction[0], 0),
+      revealCard: revealCards.length > 0 ? revealCards[0] : null,
+      revealCards,
+      oracleCard: optionalInteger(rawAction[1]),
+      oracleReserve: integer(rawAction[2], 0) === 1,
+      oracleReserveCard: optionalInteger(rawAction[3]),
+      oracleReturnColor: optionalInteger(rawAction[4]),
+      oracleGoldAs: Array.isArray(rawAction[5]) ? rawAction[5].map((value) => integer(value, 0)) : [0, 0, 0, 0, 0],
+      child: integer(rawEdge[2]),
+    };
+  };
+
+  for (const rawNode of Array.isArray(dag.nodes) ? dag.nodes : []) {
+    const row = Array.isArray(rawNode) ? rawNode : [];
+    const id = integer(row[0]);
+    const edgeStart = integer(row[5], 0);
+    const edgeCount = integer(row[6], 0);
+    nodes.set(id, {
+      id,
+      player: integer(row[1]) === 1 ? 1 : 0,
+      depth: integer(row[2], 0),
+      kind: kindStrings[integer(row[3], 0)] ?? 'state',
+      resolution: optionalInteger(row[4]) === null ? null : resolutionStrings[integer(row[4], -1)] ?? null,
+      get children() {
+        const cached = edgeCache.get(id);
+        if (cached) return cached;
+        const materialized = Array.from({ length: edgeCount }, (_unused, offset) => edgeAt(edgeStart + offset));
+        edgeCache.set(id, materialized);
+        return materialized;
+      },
+    });
+  }
+  return nodes;
+}
+
 export function parseMateStrategy(text: string): MateStrategyReplay {
   const root = asObject(JSON.parse(text) as unknown, 'strategy.json が JSON オブジェクトではありません。');
   if (root.format !== 'csplendor_mate_strategy_v1') throw new Error('未対応の strategy.json 形式です。');
   const dag = asObject(root.strategy_dag, 'strategy_dag がありません。');
   if (dag.complete !== true) throw new Error('完全な strategy DAG が必要です。');
-  const nodes = new Map<number, MateStrategyNode>();
-  for (const rawNode of Array.isArray(dag.nodes) ? dag.nodes : []) {
-    const node = asObject(rawNode, 'DAG ノードが不正です。');
-    const id = integer(node.id);
-    const children = (Array.isArray(node.children) ? node.children : []).map((rawEdge) => {
-      const edge = asObject(rawEdge, 'DAG エッジが不正です。');
-      return {
-        actionCode: integer(edge.action_code, 0),
-        revealCard: nullableInteger(edge.reveal_card),
-        oracleCard: nullableInteger(edge.oracle_card),
-        oracleReserve: edge.oracle_reserve === true,
-        oracleReserveCard: nullableInteger(edge.oracle_reserve_card),
-        oracleReturnColor: nullableInteger(edge.oracle_return_color),
-        oracleGoldAs: Array.isArray(edge.oracle_gold_as) ? edge.oracle_gold_as.map((value) => integer(value, 0)) : [0, 0, 0, 0, 0],
-        child: integer(edge.child),
-      };
-    });
-    nodes.set(id, {
-      id,
-      player: integer(node.player) === 1 ? 1 : 0,
-      depth: integer(node.depth, 0),
-      kind: typeof node.kind === 'string' ? node.kind : 'state',
-      resolution: typeof node.resolution === 'string' ? node.resolution : null,
-      children,
-    });
+  const nodes = dag.format === 'strategy_dag_compact_v1'
+    ? parseCompactStrategyDag(dag)
+    : new Map<number, MateStrategyNode>();
+  if (dag.format !== 'strategy_dag_compact_v1') {
+    for (const rawNode of Array.isArray(dag.nodes) ? dag.nodes : []) {
+      const node = asObject(rawNode, 'DAG ノードが不正です。');
+      const id = integer(node.id);
+      const children = (Array.isArray(node.children) ? node.children : []).map((rawEdge) => {
+        const edge = asObject(rawEdge, 'DAG エッジが不正です。');
+        return {
+          actionCode: integer(edge.action_code, 0),
+          revealCard: nullableInteger(edge.reveal_card),
+          oracleCard: nullableInteger(edge.oracle_card),
+          oracleReserve: edge.oracle_reserve === true,
+          oracleReserveCard: nullableInteger(edge.oracle_reserve_card),
+          oracleReturnColor: nullableInteger(edge.oracle_return_color),
+          oracleGoldAs: Array.isArray(edge.oracle_gold_as) ? edge.oracle_gold_as.map((value) => integer(value, 0)) : [0, 0, 0, 0, 0],
+          child: integer(edge.child),
+        };
+      });
+      nodes.set(id, {
+        id,
+        player: integer(node.player) === 1 ? 1 : 0,
+        depth: integer(node.depth, 0),
+        kind: typeof node.kind === 'string' ? node.kind : 'state',
+        resolution: typeof node.resolution === 'string' ? node.resolution : null,
+        children,
+      });
+    }
   }
   const rootId = integer(dag.root);
   const position = typeof root.position === 'string' ? root.position : '';
