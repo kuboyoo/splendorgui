@@ -1,6 +1,6 @@
 import { CARDS } from '@/constants/gameData';
 import { applyMateMove, parsePositionSnapshot, type MateKifuMove } from '@/lib/mateKifu';
-import { type PaymentVec, type PositionSnapshot, sanitizeSnapshot } from '@/lib/positionSnapshot';
+import { type PaymentVec, type PositionSnapshot } from '@/lib/positionSnapshot';
 
 type PlayerIndex = 0 | 1;
 
@@ -64,10 +64,6 @@ function asObject(value: unknown, message: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function cloneSnapshot(snapshot: PositionSnapshot): PositionSnapshot {
-  return sanitizeSnapshot(snapshot);
-}
-
 function parseDeckCounts(position: string): [number, number, number] {
   const match = position.match(/(?:^|\|\s*)decks:(\d+),(\d+),(\d+)(?:\s*\||$)/u);
   if (!match) throw new Error('初期局面の山札枚数がありません。');
@@ -125,9 +121,16 @@ function edgeRevealCard(edge: MateStrategyEdge): number | null {
   return edge.revealCard ?? edge.revealCards?.[0] ?? null;
 }
 
+function isOracleEdge(edge: MateStrategyEdge): boolean {
+  return edge.oracleCard !== null || edge.oracleReserve || edge.oracleReserveCard !== null || edge.oracleReturnColor !== null;
+}
+
+function assertReplayableEdge(edge: MateStrategyEdge): void {
+  if (isOracleEdge(edge)) throw new Error('strategy.json に再生不能な oracle 手が含まれています。再生成してください。');
+}
+
 export function strategyEdgeLabel(edge: MateStrategyEdge, snapshot: PositionSnapshot): string {
-  if (edge.oracleReserve) return `oracle reserve:C${edge.oracleReserveCard ?? '?'}${edge.oracleReturnColor === null ? '' : `/return:${LETTERS[edge.oracleReturnColor]}`}`;
-  if (edge.oracleCard !== null) return `oracle buy:C${edge.oracleCard}/pay:${oraclePayment(edge, snapshot).map((value, index) => `${LETTERS[index]}${value}`).join('')}`;
+  assertReplayableEdge(edge);
   const action = decodeAction(edge.actionCode);
   if (action.type === 0 || action.type === 1) return `take:${countsToLetters(action.take ?? [])}${returnSuffix(action.returns ?? [])}`;
   if (action.type === 2) return `reserve:C${action.cardId}${returnSuffix(action.returns ?? [])}`;
@@ -150,38 +153,10 @@ function purchasePayment(cardId: number, goldAs: number[], snapshot: PositionSna
   return payment;
 }
 
-function oraclePayment(edge: MateStrategyEdge, snapshot: PositionSnapshot): PaymentVec {
-  return purchasePayment(edge.oracleCard ?? -1, edge.oracleGoldAs, snapshot);
-}
-
-function applyOracleEdge(snapshot: PositionSnapshot, edge: MateStrategyEdge, nextPlayer: PlayerIndex): PositionSnapshot {
-  const next = cloneSnapshot(snapshot);
-  const player = next.currentPlayer;
-  if (edge.oracleReserve) {
-    if (edge.oracleReserveCard === null) throw new Error('oracle 予約カードIDがありません。');
-    const slot = next.reservedCards[player].indexOf(-1);
-    if (slot < 0) throw new Error('oracle 予約枠がありません。');
-    const bankGold = 5 - next.playerGems[0][5] - next.playerGems[1][5];
-    if (bankGold > 0) next.playerGems[player][5] += 1;
-    if (edge.oracleReturnColor !== null) next.playerGems[player][edge.oracleReturnColor] -= 1;
-    next.reservedCards[player][slot] = edge.oracleReserveCard;
-  } else if (edge.oracleCard !== null) {
-    const card = cardById.get(edge.oracleCard);
-    if (!card) throw new Error(`oracle 購入カード C${edge.oracleCard} がありません。`);
-    const payment = oraclePayment(edge, next);
-    next.playerGems[player] = next.playerGems[player].map((value, index) => value - payment[index]) as PaymentVec;
-    next.purchasedCounts[player][card.bonus as 0 | 1 | 2 | 3 | 4] += 1;
-    next.purchasedCardIds[player].push(edge.oracleCard);
-    next.playerPoints[player] += card.points;
-  }
-  next.currentPlayer = nextPlayer;
-  return next;
-}
-
 export function applyStrategyEdge(replay: MateStrategyReplay, snapshot: PositionSnapshot, edge: MateStrategyEdge): PositionSnapshot {
   const child = replay.nodes.get(edge.child);
   if (!child) throw new Error(`DAG ノード ${edge.child} がありません。`);
-  if (edge.oracleReserve || edge.oracleCard !== null) return applyOracleEdge(snapshot, edge, child.player);
+  assertReplayableEdge(edge);
   const action = decodeAction(edge.actionCode);
   const move: MateKifuMove = {
     player: snapshot.currentPlayer,
@@ -193,8 +168,8 @@ export function applyStrategyEdge(replay: MateStrategyReplay, snapshot: Position
 }
 
 export function applyStrategyDeckCounts(deckCounts: [number, number, number], edge: MateStrategyEdge): [number, number, number] {
+  assertReplayableEdge(edge);
   const next = [...deckCounts] as [number, number, number];
-  if (edge.oracleReserve || edge.oracleCard !== null) return next;
   const action = decodeAction(edge.actionCode);
   let level: number | null = null;
   if (action.type === 2 && action.cardId !== undefined) level = cardById.get(action.cardId)?.level ?? null;
@@ -205,8 +180,8 @@ export function applyStrategyDeckCounts(deckCounts: [number, number, number], ed
 }
 
 export function edgeMatchesBoardTarget(edge: MateStrategyEdge, target: { kind: 'card'; cardId: number } | { kind: 'deck'; level: number } | { kind: 'noble'; nobleId: number }): boolean {
+  assertReplayableEdge(edge);
   if (target.kind === 'card') {
-    if (edge.oracleCard === target.cardId || edge.oracleReserveCard === target.cardId) return true;
     const action = decodeAction(edge.actionCode);
     return (action.type === 2 || action.type === 4) && action.cardId === target.cardId;
   }
@@ -237,6 +212,21 @@ function parseCompactStrategyDag(dag: Record<string, unknown>): Map<number, Mate
   const edgeRows = Array.isArray(dag.edges) ? dag.edges : [];
   const nodes = new Map<number, MateStrategyNode>();
   const edgeCache = new Map<number, MateStrategyEdge[]>();
+
+  actionTemplates.forEach((template, index) => {
+    const rawAction = Array.isArray(template) ? template : [];
+    const edge: MateStrategyEdge = {
+      actionCode: integer(rawAction[0], 0),
+      revealCard: null,
+      oracleCard: optionalInteger(rawAction[1]),
+      oracleReserve: integer(rawAction[2], 0) === 1,
+      oracleReserveCard: optionalInteger(rawAction[3]),
+      oracleReturnColor: optionalInteger(rawAction[4]),
+      oracleGoldAs: Array.isArray(rawAction[5]) ? rawAction[5].map((value) => integer(value, 0)) : [0, 0, 0, 0, 0],
+      child: -1,
+    };
+    if (isOracleEdge(edge)) throw new Error(`strategy.json の action_templates[${index}] に再生不能な oracle 手が含まれています。再生成してください。`);
+  });
 
   const edgeAt = (index: number): MateStrategyEdge => {
     const rawEdge = Array.isArray(edgeRows[index]) ? edgeRows[index] : [];
@@ -294,7 +284,7 @@ export function parseMateStrategy(text: string): MateStrategyReplay {
       const id = integer(node.id);
       const children = (Array.isArray(node.children) ? node.children : []).map((rawEdge) => {
         const edge = asObject(rawEdge, 'DAG エッジが不正です。');
-        return {
+        const parsedEdge: MateStrategyEdge = {
           actionCode: integer(edge.action_code, 0),
           revealCard: nullableInteger(edge.reveal_card),
           oracleCard: nullableInteger(edge.oracle_card),
@@ -304,6 +294,8 @@ export function parseMateStrategy(text: string): MateStrategyReplay {
           oracleGoldAs: Array.isArray(edge.oracle_gold_as) ? edge.oracle_gold_as.map((value) => integer(value, 0)) : [0, 0, 0, 0, 0],
           child: integer(edge.child),
         };
+        assertReplayableEdge(parsedEdge);
+        return parsedEdge;
       });
       nodes.set(id, {
         id,
