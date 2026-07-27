@@ -10,7 +10,7 @@ import { getNobleById } from '@/constants/gameData';
 
 interface PlayerAreaProps {
     player: Omit<PlayerState, 'reserved_cards' | 'purchased_cards' | 'acquired_nobles'> & {
-        reserved_cards: CardData[];
+        reserved_cards: (CardData | null)[];
         purchased_cards: CardData[];
         acquired_nobles: number[];
     };
@@ -39,6 +39,7 @@ interface PlayerAreaProps {
     allowReservedCardClick?: boolean;
     onReservedSlotClick?: (playerIndex: number, slot: number) => void;
     reservedSlotCount?: number;
+    hiddenReservedLevels?: Record<string, 1 | 2 | 3>;
 }
 
 const PlayerArea: React.FC<PlayerAreaProps> = ({
@@ -68,12 +69,19 @@ const PlayerArea: React.FC<PlayerAreaProps> = ({
     allowReservedCardClick = false,
     onReservedSlotClick,
     reservedSlotCount,
+    hiddenReservedLevels = {},
 }) => {
     // Ensure lists are valid
     const safeReturningGems = returningGems || [0, 0, 0, 0, 0, 0];
     const safePayingGems = payingGems || [0, 0, 0, 0, 0, 0];
     const canEditPoints = !!onPlayerPointClick;
     const canEditName = !!onPlayerNameClick;
+    const hiddenLevelAt = (slotIndex: number) =>
+        hiddenReservedLevels[`${player.index}:${slotIndex}`];
+    const reservedCardCount = player.reserved_cards.reduce(
+        (count, card, slotIndex) => count + (card || hiddenLevelAt(slotIndex) ? 1 : 0),
+        0,
+    );
     const handleAreaClick = (event: React.MouseEvent<HTMLDivElement>) => {
         if (!onAreaClick) return;
         const target = event.target as HTMLElement | null;
@@ -319,14 +327,33 @@ const PlayerArea: React.FC<PlayerAreaProps> = ({
                     <div className="flex items-center gap-2">
                         <div className="text-xs font-bold text-slate-400 uppercase tracking-widest">Reserved</div>
                         <div className="flex h-5 w-5 items-center justify-center rounded-full bg-slate-200 text-[10px] font-bold text-slate-600">
-                            {player.reserved_cards.length}
+                            {reservedCardCount}
                         </div>
                     </div>
                     <div className="flex gap-3 min-h-[140px]" data-player-reserved={player.index}>
                         {reservedSlotCount ? (
                             Array.from({ length: reservedSlotCount }, (_, slotIdx) => {
                                 const card = player.reserved_cards[slotIdx] ?? null;
+                                const hiddenLevel = hiddenLevelAt(slotIdx);
                                 const canEditSlot = !!onReservedSlotClick;
+
+                                if (!card && hiddenLevel) {
+                                    return (
+                                        <div
+                                            key={`reserved-hidden-${player.index}-${slotIdx}`}
+                                            className={`
+                                                w-24 h-32 rounded-xl bg-slate-200 border-2 border-slate-300 flex flex-col items-center justify-center shadow-inner
+                                                ${canEditSlot ? 'cursor-pointer hover:bg-slate-300/70 transition-colors' : ''}
+                                            `}
+                                            title={`Level ${hiddenLevel} Deck Card`}
+                                            onClick={canEditSlot ? () => onReservedSlotClick?.(player.index, slotIdx) : undefined}
+                                        >
+                                            <div className="w-16 h-20 rounded-lg border-2 border-dashed border-slate-400 flex items-center justify-center opacity-30">
+                                                <span className="font-serif font-bold text-2xl text-slate-500">{hiddenLevel}</span>
+                                            </div>
+                                        </div>
+                                    );
+                                }
 
                                 if (!card) {
                                     return (
@@ -386,7 +413,22 @@ const PlayerArea: React.FC<PlayerAreaProps> = ({
                                 );
                             })
                         ) : player.reserved_cards.length > 0 ? (
-                            player.reserved_cards.map((card) => {
+                            player.reserved_cards.map((card, slotIdx) => {
+                                const hiddenLevel = hiddenLevelAt(slotIdx);
+                                if (!card && hiddenLevel) {
+                                    return (
+                                        <div
+                                            key={`reserved-hidden-${player.index}-${slotIdx}`}
+                                            className="w-24 h-32 rounded-xl bg-slate-200 border-2 border-slate-300 flex flex-col items-center justify-center shadow-inner"
+                                            title={`Level ${hiddenLevel} Deck Card`}
+                                        >
+                                            <div className="w-16 h-20 rounded-lg border-2 border-dashed border-slate-400 flex items-center justify-center opacity-30">
+                                                <span className="font-serif font-bold text-2xl text-slate-500">{hiddenLevel}</span>
+                                            </div>
+                                        </div>
+                                    );
+                                }
+                                if (!card) return null;
                                 const isVisible = !isOpponent || publicReservedCardIds.includes(card.id);
                                 const canClick = !!onReservedCardClick && (!isOpponent || allowReservedCardClick);
 

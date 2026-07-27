@@ -4,6 +4,10 @@ out/
 dist/
 coverage/
 *.tsbuildinfo
+__pycache__/
+*.pyc
+.playwright-cli/
+output/playwright/
 .env
 .env.*
 !.env.example

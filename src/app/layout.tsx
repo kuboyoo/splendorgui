@@ -2,8 +2,8 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'lisplendor 局面エディタ',
-  description: 'Splendor の局面エディタです。',
+  title: 'lisplendor',
+  description: 'Splendor の局面編集・AI対局GUIです。',
 };
 
 export default function RootLayout({

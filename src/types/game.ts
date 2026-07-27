@@ -7,7 +7,8 @@ export enum ActionType {
   RESERVE_CARD = 2,
   RESERVE_DECK = 3,
   PURCHASE = 4,
-  VISIT_NOBLE = 5
+  VISIT_NOBLE = 5,
+  PASS = 6
 }
 
 export interface CardData {
