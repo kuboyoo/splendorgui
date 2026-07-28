@@ -24,12 +24,12 @@ Browser (/play)
       -> csplendor (rules and game state)
       -> dlsplendor (network and MCTS)
       -> models/selfplay{5,7}/weights/*.pt
-      -> models/selfplay{8,9,10}/best.pt
-      -> configs/selfplay{7,8,9,10}.yaml (model and input features)
+      -> models/selfplay{8,9,10,12}/best.pt
+      -> configs/selfplay{7,8,9,10,12}.yaml (model and input features)
 ```
 
 - ブラウザへモデルパスを公開せず、サーバー側の固定カタログから選択する。
-- モデルごとの設定も固定カタログで解決し、`selfplay7`〜`selfplay9` のmulti-head構成と`selfplay10`の313次元公開確率特徴を正しく復元する。
+- モデルごとの設定も固定カタログで解決し、`selfplay7`〜`selfplay9` のmulti-head構成と`selfplay10`以降の313次元公開確率特徴を正しく復元する。
 - 山札から予約したカードは、本人以外への対局APIではカードIDを返さず、プレイヤー番号・予約スロットごとのレベルだけを返す。AI同士の観戦では両者とも伏せる。
 - `.pt` は `dlsplendor` 側の配置を直接参照し、GUIリポジトリへコピーしない。
 - 対局セッション、MCTS tree、ロード済みnetworkはPythonワーカー内だけに保持する。

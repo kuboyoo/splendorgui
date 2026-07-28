@@ -220,6 +220,7 @@ class LatestCheckpointIntegrationTest(unittest.TestCase):
         ("selfplay8-best", "selfplay8", Path("best.pt")),
         ("selfplay9-best", "selfplay9", Path("best.pt")),
         ("selfplay10-best", "selfplay10", Path("best.pt")),
+        ("selfplay12-best", "selfplay12", Path("best.pt")),
     )
 
     @classmethod
@@ -398,19 +399,53 @@ class LatestCheckpointIntegrationTest(unittest.TestCase):
             ["selfplay9-best", "selfplay10-best"],
         )
 
-    def test_human_move_can_be_followed_by_selfplay10_move(self) -> None:
+    def test_selfplay10_vs_selfplay12_can_play_spectator_match(self) -> None:
+        payload = engine._new_game(
+            {
+                "mode": "ai-vs-ai",
+                "player_kinds": ["checkpoint", "checkpoint"],
+                "model_ids": ["selfplay10-best", "selfplay12-best"],
+                "model_paths": [
+                    str(self.model_path("selfplay10")),
+                    str(self.model_path("selfplay12")),
+                ],
+                "model_config_paths": [
+                    str(self.config_path("selfplay10")),
+                    str(self.config_path("selfplay12")),
+                ],
+                "human_seat": None,
+                "simulations": 1,
+                "seed": 275,
+            }
+        )
+
+        first_move = engine._ai_action({"session_id": payload["session_id"]})
+        second_move = engine._ai_action({"session_id": payload["session_id"]})
+
+        self.assertEqual(
+            second_move["player_model_ids"],
+            ["selfplay10-best", "selfplay12-best"],
+        )
+        self.assertEqual(first_move["ai_move"]["model_id"], "selfplay10-best")
+        self.assertEqual(second_move["ai_move"]["model_id"], "selfplay12-best")
+        self.assertEqual(
+            [move["model_id"] for move in second_move["moves"]],
+            ["selfplay10-best", "selfplay12-best"],
+        )
+
+    def test_human_move_can_be_followed_by_selfplay12_move(self) -> None:
         payload = engine._new_game(
             {
                 "mode": "human-vs-ai",
                 "player_kinds": [None, "checkpoint"],
-                "model_ids": [None, "selfplay10-best"],
+                "model_ids": [None, "selfplay12-best"],
                 "model_paths": [
                     None,
-                    str(self.model_path("selfplay10")),
+                    str(self.model_path("selfplay12")),
                 ],
                 "model_config_paths": [
                     None,
-                    str(self.config_path("selfplay10")),
+                    str(self.config_path("selfplay12")),
                 ],
                 "human_seat": 0,
                 "simulations": 1,
@@ -427,7 +462,7 @@ class LatestCheckpointIntegrationTest(unittest.TestCase):
         self.assertEqual(after_ai["moves"][1]["actor"], "ai")
         self.assertEqual(
             after_ai["moves"][1]["model_id"],
-            "selfplay10-best",
+            "selfplay12-best",
         )
 
 

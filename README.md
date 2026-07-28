@@ -44,12 +44,13 @@ python -m pip install -e ../dlsplendor
 
 `npm run dev` の起動後に `/play` を開くと、Next.jsサーバーがローカルのPythonワーカーを自動起動します。別途FastAPIやUSIエンジンを起動する必要はありません。
 
-既定の対戦相手は、次の `selfplay10` best モデルです。
+既定の対戦相手は、現状の最終bestである次の `selfplay12` モデルです。
+
+- `selfplay12/best.pt`（iteration 000011）
+
+AI観戦の初期組み合わせは `selfplay10 best` 対 `selfplay12 best` です。比較用として、次のモデルも選択できます。
 
 - `selfplay10/best.pt`（iteration 000007）
-
-AI観戦の初期組み合わせは `selfplay9 best` 対 `selfplay10 best` です。比較用として、次のモデルも選択できます。
-
 - `selfplay9/best.pt`（iteration 000012）
 - `selfplay8/best.pt`（iteration 000008）
 - `selfplay7/weights/iteration_000030.pt`
@@ -65,7 +66,7 @@ AI観戦の初期組み合わせは `selfplay9 best` 対 `selfplay10 best` で�
 
 checkpoint不要の基準AIとして、`ルールAI（3手・得点効率）` も選択できます。3手以内に購入できる得点カードを得点÷支払い枚数で選び、得点カードがない場合は支払い枚数が最小のカードを狙います。
 
-モデルは `../dlsplendor/models/` から直接読み込みます。`selfplay7`、`selfplay8`、`selfplay9`、`selfplay10` にはそれぞれ対応する `../dlsplendor/configs/selfplay*.yaml` を自動適用するため、multi-head checkpointとselfplay10の313次元公開確率特徴をそのまま利用できます。既定の探索回数は学習時と同じ400 simulationsです。先手・後手、探索回数、乱数seedは画面上で指定できます。探索回数は1以上の整数で、上限は設けていません。ルールAIは探索回数を使用しません。
+モデルは `../dlsplendor/models/` から直接読み込みます。`selfplay7`、`selfplay8`、`selfplay9`、`selfplay10`、`selfplay12` にはそれぞれ対応する `../dlsplendor/configs/selfplay*.yaml` を自動適用するため、multi-head checkpointとselfplay10以降の313次元公開確率特徴をそのまま利用できます。既定の探索回数は学習時と同じ400 simulationsです。先手・後手、探索回数、乱数seedは画面上で指定できます。探索回数は1以上の整数で、上限は設けていません。ルールAIは探索回数を使用しません。
 
 `AI vs AI 観戦` を選ぶと、P0・P1それぞれのAIを指定して対局を自動再生できます。着手間隔は0秒以上の任意値（小数可）で、観戦中にも変更できます。一時停止・再開・1手進行に対応し、各着手と探索情報は右側の棋譜・検索欄へ記録されます。指定間隔は着手前の待機時間で、実際の表示間隔にはAIの探索時間も加わります。モデル同士が停滞した場合は、`dlsplendor` のArenaと同じく150ターンで打ち切り、引き分けとして表示します。
 
@@ -82,7 +83,7 @@ DLSPLENDOR_GUI_TORCH_THREADS=4 npm run dev
 - `DLSPLENDOR_GUI_TORCH_THREADS`: PyTorchのCPUスレッド数。既定は `2`。
 - `DLSPLENDOR_GUI_DEVICE`: `cpu`、`cuda`、`auto`。既定は `cpu`。
 
-ローカルAI連携のテストでは、配置済みの `selfplay7`・`selfplay8`・`selfplay9`・`selfplay10` checkpointを実際に読み込み、人間対AIとAI観戦の着手を確認します。
+ローカルAI連携のテストでは、配置済みの `selfplay7`・`selfplay8`・`selfplay9`・`selfplay10`・`selfplay12` checkpointを実際に読み込み、人間対AIとAI観戦の着手を確認します。
 
 ```bash
 python -m unittest scripts.test_dlsplendor_gui_engine -v

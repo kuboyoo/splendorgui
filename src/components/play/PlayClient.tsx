@@ -182,6 +182,11 @@ export default function PlayClient() {
         const comparison =
           payload.models.find(
             (model) =>
+              model.family === 'selfplay10' &&
+              model.available,
+          ) ??
+          payload.models.find(
+            (model) =>
               model.family === 'selfplay9' &&
               model.available,
           ) ??

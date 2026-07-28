@@ -36,6 +36,18 @@ const SELFPLAY5_NOTES: Record<(typeof SELFPLAY5_ITERATIONS)[number], string> = {
   998: '824に107勝91敗2分',
 };
 
+const SELFPLAY12_MODEL: DlsplendorModelDefinition = {
+  id: 'selfplay12-best',
+  kind: 'checkpoint',
+  family: 'selfplay12',
+  iteration: 11,
+  label: 'selfplay12 best（iteration 000011）',
+  note: 'selfplay10 bestに408勝382敗10分（推定+11 Elo）',
+  recommended: true,
+  relativePath: path.join('models', 'selfplay12', 'best.pt'),
+  configRelativePath: path.join('configs', 'selfplay12.yaml'),
+};
+
 const SELFPLAY10_MODEL: DlsplendorModelDefinition = {
   id: 'selfplay10-best',
   kind: 'checkpoint',
@@ -43,7 +55,7 @@ const SELFPLAY10_MODEL: DlsplendorModelDefinition = {
   iteration: 7,
   label: 'selfplay10 best（iteration 000007）',
   note: '公開山札確率・3手購入経路・妨害候補を学習',
-  recommended: true,
+  recommended: false,
   relativePath: path.join('models', 'selfplay10', 'best.pt'),
   configRelativePath: path.join('configs', 'selfplay10.yaml'),
 };
@@ -120,6 +132,7 @@ const SELFPLAY5_MODELS: readonly DlsplendorModelDefinition[] =
   });
 
 export const DLSPLENDOR_MODELS: readonly DlsplendorModelDefinition[] = [
+  SELFPLAY12_MODEL,
   SELFPLAY10_MODEL,
   SELFPLAY9_MODEL,
   SELFPLAY8_MODEL,
