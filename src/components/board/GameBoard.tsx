@@ -31,6 +31,7 @@ interface GameBoardProps {
     aiEnabled?: boolean;
     winRates?: [number, number];
     publicReservedCardIds?: number[];
+    hiddenReservedLevels?: Record<string, 1 | 2 | 3>;
     onResourceClick?: (type: GemType) => void;
     returningGems?: [number, number, number, number, number, number];
     isReturnSelectable?: (type: GemType) => boolean;
@@ -76,6 +77,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
     aiEnabled = false,
     winRates = [50, 50],
     publicReservedCardIds = [],
+    hiddenReservedLevels = {},
     onResourceClick,
     returningGems = [0, 0, 0, 0, 0, 0],
     isReturnSelectable,
@@ -334,7 +336,9 @@ const GameBoard: React.FC<GameBoardProps> = ({
                 <PlayerArea
                     player={{
                         ...me,
-                        reserved_cards: me.reserved_cards.map(getCardById),
+                        reserved_cards: me.reserved_cards.map((cardId) =>
+                            cardId >= 0 ? getCardById(cardId) : null
+                        ),
                         purchased_cards: mePurchasedCards,
                         acquired_nobles: me.acquired_nobles || []
                     }}
@@ -361,13 +365,16 @@ const GameBoard: React.FC<GameBoardProps> = ({
                     aiStatus={currentPlayerIdx === perspective ? aiStatus : 'idle'}
                     playerName={perspective === 0 ? player0Name : player1Name}
                     reservedSlotCount={reservedSlotCount}
+                    hiddenReservedLevels={hiddenReservedLevels}
                 />
 
                 {/* Opponent Area (Right) */}
                 <PlayerArea
                     player={{
                         ...opponent,
-                        reserved_cards: opponent.reserved_cards.map(getCardById),
+                        reserved_cards: opponent.reserved_cards.map((cardId) =>
+                            cardId >= 0 ? getCardById(cardId) : null
+                        ),
                         purchased_cards: opponentPurchasedCards,
                         acquired_nobles: opponent.acquired_nobles || []
                     }}
@@ -394,6 +401,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
                     aiStatus={currentPlayerIdx !== perspective ? aiStatus : 'idle'}
                     playerName={perspective === 0 ? player1Name : player0Name}
                     reservedSlotCount={reservedSlotCount}
+                    hiddenReservedLevels={hiddenReservedLevels}
                 />
             </div>
 
