@@ -55,13 +55,21 @@ except RuntimeError:
 
 
 def _resolve_device() -> torch.device:
-    requested = os.environ.get("DLSPLENDOR_GUI_DEVICE", "cpu").strip().lower()
+    requested = os.environ.get("DLSPLENDOR_GUI_DEVICE", "auto").strip().lower()
     if requested == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
     if requested == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("DLSPLENDOR_GUI_DEVICE=cudaですが、CUDAを利用できません。")
-    if requested not in {"cpu", "cuda"}:
-        raise ValueError("DLSPLENDOR_GUI_DEVICEはcpu、cuda、autoのいずれかです。")
+    if requested == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("DLSPLENDOR_GUI_DEVICE=mpsですが、MPSを利用できません。")
+    if requested not in {"cpu", "cuda", "mps"}:
+        raise ValueError(
+            "DLSPLENDOR_GUI_DEVICEはcpu、cuda、mps、autoのいずれかです。"
+        )
     return torch.device(requested)
 
 

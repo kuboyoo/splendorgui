@@ -5,6 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import csplendor
 
@@ -18,6 +19,52 @@ if DLSPLENDOR_ROOT.is_dir():
     sys.path.insert(0, str(DLSPLENDOR_ROOT))
 
 from scripts import dlsplendor_gui_engine as engine  # noqa: E402
+
+
+class DeviceResolutionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.original_device = os.environ.pop("DLSPLENDOR_GUI_DEVICE", None)
+
+    def tearDown(self) -> None:
+        if self.original_device is None:
+            os.environ.pop("DLSPLENDOR_GUI_DEVICE", None)
+        else:
+            os.environ["DLSPLENDOR_GUI_DEVICE"] = self.original_device
+
+    def test_default_prefers_cuda_over_mps(self) -> None:
+        with (
+            patch.object(engine.torch.cuda, "is_available", return_value=True),
+            patch.object(
+                engine.torch.backends.mps, "is_available", return_value=True
+            ),
+        ):
+            self.assertEqual(engine._resolve_device(), engine.torch.device("cuda"))
+
+    def test_default_uses_mps_when_cuda_is_unavailable(self) -> None:
+        with (
+            patch.object(engine.torch.cuda, "is_available", return_value=False),
+            patch.object(
+                engine.torch.backends.mps, "is_available", return_value=True
+            ),
+        ):
+            self.assertEqual(engine._resolve_device(), engine.torch.device("mps"))
+
+    def test_default_falls_back_to_cpu_without_accelerator(self) -> None:
+        with (
+            patch.object(engine.torch.cuda, "is_available", return_value=False),
+            patch.object(
+                engine.torch.backends.mps, "is_available", return_value=False
+            ),
+        ):
+            self.assertEqual(engine._resolve_device(), engine.torch.device("cpu"))
+
+    def test_explicit_mps_requires_an_available_backend(self) -> None:
+        os.environ["DLSPLENDOR_GUI_DEVICE"] = "mps"
+        with patch.object(
+            engine.torch.backends.mps, "is_available", return_value=False
+        ):
+            with self.assertRaisesRegex(RuntimeError, "MPSを利用できません"):
+                engine._resolve_device()
 
 
 class GameTurnAdjudicationTest(unittest.TestCase):
