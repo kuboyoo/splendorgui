@@ -56,6 +56,7 @@ export async function POST(request: NextRequest) {
         edge_limit: Math.floor(clamp(envNumber('CSPLENDOR_MATE_EDGE_LIMIT', 250_000), 0, 1_000_000)),
         preferred_attacker_actions: preferredAttackerActions,
       },
+      request.signal,
     );
     return NextResponse.json(result, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {

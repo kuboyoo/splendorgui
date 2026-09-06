@@ -13,8 +13,10 @@ from csplendor.mate_frontier import expand_mate_frontier, load_mate_frontier_gam
 
 PROTOCOL_VERSION = 1
 MAX_CACHE_ENTRIES = 64
+MAX_CACHE_ENTRY_BYTES = 8 * 1024 * 1024
+MAX_CACHE_BYTES = 64 * 1024 * 1024
 
-_CACHE: OrderedDict[tuple[object, ...], dict[str, Any]] = OrderedDict()
+_CACHE: OrderedDict[tuple[object, ...], tuple[dict[str, Any], int]] = OrderedDict()
 
 
 def _bounded_int(
@@ -81,7 +83,7 @@ def _expand(payload: dict[str, Any]) -> dict[str, Any]:
     cached = _CACHE.get(cache_key)
     if cached is not None:
         _CACHE.move_to_end(cache_key)
-        return cached
+        return cached[0]
 
     game = load_mate_frontier_game(position=position, state=state)
     result = expand_mate_frontier(
@@ -93,10 +95,16 @@ def _expand(payload: dict[str, Any]) -> dict[str, Any]:
         edge_limit=edge_limit,
         preferred_attacker_actions=preferred_attacker_actions,
     )
-    _CACHE[cache_key] = result
-    _CACHE.move_to_end(cache_key)
-    while len(_CACHE) > MAX_CACHE_ENTRIES:
-        _CACHE.popitem(last=False)
+    serialized_bytes = len(
+        json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    if serialized_bytes <= MAX_CACHE_ENTRY_BYTES:
+        _CACHE[cache_key] = (result, serialized_bytes)
+        _CACHE.move_to_end(cache_key)
+        while len(_CACHE) > MAX_CACHE_ENTRIES or sum(
+            entry_bytes for _, entry_bytes in _CACHE.values()
+        ) > MAX_CACHE_BYTES:
+            _CACHE.popitem(last=False)
     return result
 
 

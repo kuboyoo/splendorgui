@@ -55,6 +55,53 @@ class CsplendorMateEngineTest(unittest.TestCase):
         self.assertIs(cached, result)
         self.assertEqual(len(engine._CACHE), 1)
 
+    def test_large_frontier_is_not_cached(self) -> None:
+        payload = {
+            "position": _one_turn_mate_position(),
+            "attacker": 1,
+            "depth": 1,
+        }
+        result = {"edges": [{"child_state": "x" * 100}]}
+
+        with (
+            patch.object(engine, "MAX_CACHE_ENTRY_BYTES", 32),
+            patch.object(engine, "expand_mate_frontier", return_value=result),
+        ):
+            returned = engine._handle("expand_frontier", payload)
+
+        self.assertIs(returned, result)
+        self.assertEqual(len(engine._CACHE), 0)
+
+    def test_cache_evicts_entries_to_stay_within_byte_limit(self) -> None:
+        first_payload = {
+            "position": _one_turn_mate_position(),
+            "attacker": 1,
+            "depth": 1,
+        }
+        second_payload = {**first_payload, "depth": 0}
+        first_result = {"edges": [{"child_state": "a" * 40}]}
+        second_result = {"edges": [{"child_state": "b" * 40}]}
+        entry_bytes = len(
+            engine.json.dumps(
+                first_result, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+        )
+
+        with (
+            patch.object(engine, "MAX_CACHE_ENTRY_BYTES", entry_bytes),
+            patch.object(engine, "MAX_CACHE_BYTES", entry_bytes),
+            patch.object(
+                engine,
+                "expand_mate_frontier",
+                side_effect=[first_result, second_result],
+            ),
+        ):
+            engine._handle("expand_frontier", first_payload)
+            engine._handle("expand_frontier", second_payload)
+
+        self.assertEqual(len(engine._CACHE), 1)
+        self.assertIs(next(iter(engine._CACHE.values()))[0], second_result)
+
     def test_expand_rejects_unbounded_depth(self) -> None:
         with self.assertRaisesRegex(ValueError, "depth"):
             engine._handle(
