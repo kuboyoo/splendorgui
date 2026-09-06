@@ -36,7 +36,7 @@ from dlsplendor.search.mcts import MCTS
 
 MAX_SESSIONS = 24
 MAX_GAME_TURNS = 150
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 8
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -176,7 +176,12 @@ def _load_model(
         expected_action_dim,
         config.model,
     ).to(DEVICE)
-    network.load_compatible_state_dict(checkpoint["model_state_dict"])
+    # Deployment configs grow auxiliary heads and fixed adapter buffers over time.
+    # The dlsplendor compatibility loader still rejects trunk/policy mismatches,
+    # while allowing those explicitly optional additions for older champions.
+    network.load_compatible_state_dict(
+        checkpoint["model_state_dict"], allow_auxiliary_mismatch=True
+    )
     network.eval()
     loaded = LoadedModel(
         model_id=model_id,
@@ -201,6 +206,67 @@ def _load_model(
 def _optional_id(value: Any) -> int | None:
     parsed = int(value)
     return parsed if parsed >= 0 else None
+
+
+def _search_profile(model: LoadedModel, simulations: int) -> dict[str, Any]:
+    """Expose the effective deployment search without leaking model paths."""
+
+    if model.kind == "rule":
+        return {
+            "level": "rule",
+            "requested_simulations": 0,
+            "determinization": False,
+            "tree_reuse": False,
+            "root_noise": False,
+            "mate_search_enabled": False,
+            "mate_search_min_points": None,
+            "mate_search_max_depth": None,
+            "mate_search_max_nodes": None,
+            "mate_search_time_limit_ms": None,
+            "tactical_reserve_enabled": False,
+            "tactical_reserve_simulations": None,
+            "strategic_candidates_enabled": False,
+            "strategic_candidate_simulations": None,
+            "reserve_plan_enabled": False,
+            "reserve_plan_simulations": None,
+        }
+    if model.config is None:
+        raise RuntimeError(f"{model.model_id}の探索設定がありません。")
+
+    search = model.config.search
+    full_search = all(
+        (
+            bool(search.mate_search_enabled),
+            bool(search.tactical_reserve_enabled),
+            bool(search.strategic_candidates_enabled),
+            bool(search.reserve_plan_enabled),
+        )
+    )
+    return {
+        "level": "full" if full_search else "legacy",
+        "requested_simulations": int(simulations),
+        "determinization": bool(search.determinization),
+        "tree_reuse": bool(search.reuse_tree),
+        # GUI対局は評価運用なので、学習用root noiseは常に無効。
+        "root_noise": False,
+        "mate_search_enabled": bool(search.mate_search_enabled),
+        "mate_search_min_points": int(search.mate_search_min_points),
+        "mate_search_max_depth": int(search.mate_search_max_depth),
+        "mate_search_max_nodes": int(search.mate_search_max_nodes),
+        "mate_search_time_limit_ms": int(search.mate_search_time_limit_ms),
+        "tactical_reserve_enabled": bool(search.tactical_reserve_enabled),
+        "tactical_reserve_simulations": int(
+            search.tactical_reserve_simulations
+        ),
+        "strategic_candidates_enabled": bool(
+            search.strategic_candidates_enabled
+        ),
+        "strategic_candidate_simulations": int(
+            search.strategic_candidate_simulations
+        ),
+        "reserve_plan_enabled": bool(search.reserve_plan_enabled),
+        "reserve_plan_simulations": int(search.reserve_plan_simulations),
+    }
 
 
 def _serialize_action(game: csplendor.Game, action: csplendor.Action) -> dict[str, Any]:
@@ -324,6 +390,14 @@ def _session_payload(
             "mode": session.mode,
             "player_model_ids": [
                 model.model_id if model is not None else None
+                for model in session.models_by_seat
+            ],
+            "player_search_profiles": [
+                (
+                    _search_profile(model, session.simulations)
+                    if model is not None
+                    else None
+                )
                 for model in session.models_by_seat
             ],
             # Kept for compatibility with clients created before spectator mode.
@@ -609,9 +683,42 @@ def _ai_action(payload: dict[str, Any]) -> dict[str, Any]:
         **move,
         "action_id": int(action_id),
         "simulations": int(search_info.get("simulations", 0)),
+        "requested_simulations": int(
+            search_info.get(
+                "requested_simulations",
+                session.simulations if model.kind == "checkpoint" else 0,
+            )
+        ),
         "value": float(search_info.get("value", 0.0)),
         "elapsed_ms": round(elapsed_ms),
         "tree_reused": bool(search_info.get("tree_reused", False)),
+        "reused_visits": int(search_info.get("reused_visits", 0)),
+        "chance_nodes": int(search_info.get("chance_nodes", 0)),
+        "chance_outcomes_scored": int(
+            search_info.get("chance_outcomes_scored", 0)
+        ),
+        "mate_search_attempted": bool(
+            search_info.get("mate_search_attempted", False)
+        ),
+        "mate_proven": bool(search_info.get("mate_proven", False)),
+        "mate_value_proven": bool(
+            search_info.get("mate_value_proven", False)
+        ),
+        "mate_depth": (
+            None
+            if search_info.get("mate_depth") is None
+            else int(search_info["mate_depth"])
+        ),
+        "mate_search_nodes": int(search_info.get("mate_search_nodes", 0)),
+        "mate_search_elapsed_ms": float(
+            search_info.get("mate_search_elapsed_ms", 0.0)
+        ),
+        "mate_search_stop_reason": (
+            None
+            if search_info.get("mate_search_stop_reason") is None
+            else str(search_info["mate_search_stop_reason"])
+        ),
+        "search_profile": _search_profile(model, session.simulations),
     }
     return _session_payload(session, ai_move=ai_move)
 
