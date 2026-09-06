@@ -14,7 +14,8 @@ interface WorkerResponse {
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
-  timeout: NodeJS.Timeout;
+  timeout?: NodeJS.Timeout;
+  command: string;
   requestLine: string;
   signal?: AbortSignal;
   abortHandler?: () => void;
@@ -39,14 +40,6 @@ class CsplendorMateEngine {
     if (signal?.aborted) throw this.abortError();
     const requestId = String(++this.requestSequence);
     return new Promise<T>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const wasActive = this.activeRequestId === requestId;
-        const pending = this.takePending(requestId);
-        if (!pending) return;
-        pending.reject(new Error(`詰み探索がタイムアウトしました（command: ${command}）。`));
-        if (wasActive) this.stopActiveProcess();
-        this.dispatchNext();
-      }, REQUEST_TIMEOUT_MS);
       const abortHandler = signal
         ? () => {
             const wasActive = this.activeRequestId === requestId;
@@ -62,7 +55,7 @@ class CsplendorMateEngine {
       this.pending.set(requestId, {
         resolve: (value) => resolve(value as T),
         reject,
-        timeout,
+        command,
         requestLine: `${JSON.stringify({ request_id: requestId, command, payload })}\n`,
         signal,
         abortHandler,
@@ -143,6 +136,16 @@ class CsplendorMateEngine {
 
     const child = this.ensureProcess();
     this.activeRequestId = requestId;
+    pending.timeout = setTimeout(() => {
+      if (this.activeRequestId !== requestId) return;
+      const active = this.takePending(requestId);
+      if (!active) return;
+      active.reject(
+        new Error(`詰み探索がタイムアウトしました（command: ${active.command}）。`),
+      );
+      this.stopActiveProcess();
+      this.dispatchNext();
+    }, REQUEST_TIMEOUT_MS);
     child.stdin.write(pending.requestLine, (error) => {
       if (!error || this.process !== child || this.activeRequestId !== requestId) return;
       this.handleProcessFailure(
@@ -191,7 +194,7 @@ class CsplendorMateEngine {
     const pendingRequests = [...this.pending.values()];
     this.pending.clear();
     for (const pending of pendingRequests) {
-      clearTimeout(pending.timeout);
+      if (pending.timeout) clearTimeout(pending.timeout);
       if (pending.signal && pending.abortHandler) {
         pending.signal.removeEventListener('abort', pending.abortHandler);
       }
@@ -205,7 +208,7 @@ class CsplendorMateEngine {
     this.pending.delete(requestId);
     const queueIndex = this.queue.indexOf(requestId);
     if (queueIndex >= 0) this.queue.splice(queueIndex, 1);
-    clearTimeout(pending.timeout);
+    if (pending.timeout) clearTimeout(pending.timeout);
     if (pending.signal && pending.abortHandler) {
       pending.signal.removeEventListener('abort', pending.abortHandler);
     }
