@@ -4,6 +4,9 @@ import { getCsplendorMateEngine } from '@/lib/server/csplendorMateEngine';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+const MAX_BROWSER_FRONTIER_EDGES = 10_000;
+const MAX_BROWSER_FRONTIER_BYTES = 16 * 1024 * 1024;
+
 function envNumber(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
@@ -53,12 +56,25 @@ export async function POST(request: NextRequest) {
         depth,
         max_nodes: Math.floor(clamp(envNumber('CSPLENDOR_MATE_NODE_LIMIT', 5_000_000), 0, 20_000_000)),
         time_limit_seconds: clamp(envNumber('CSPLENDOR_MATE_TIME_LIMIT', 30), 0, 600),
-        edge_limit: Math.floor(clamp(envNumber('CSPLENDOR_MATE_EDGE_LIMIT', 250_000), 0, 1_000_000)),
+        edge_limit: Math.floor(clamp(
+          envNumber('CSPLENDOR_MATE_EDGE_LIMIT', MAX_BROWSER_FRONTIER_EDGES),
+          0,
+          MAX_BROWSER_FRONTIER_EDGES,
+        )),
         preferred_attacker_actions: preferredAttackerActions,
       },
       request.signal,
     );
-    return NextResponse.json(result, { headers: { 'Cache-Control': 'no-store' } });
+    const responseBody = JSON.stringify(result);
+    if (Buffer.byteLength(responseBody, 'utf8') > MAX_BROWSER_FRONTIER_BYTES) {
+      throw new Error('遅延応手の展開結果がブラウザの安全上限（16 MiB）を超えました。');
+    }
+    return new NextResponse(responseBody, {
+      headers: {
+        'Cache-Control': 'no-store',
+        'Content-Type': 'application/json',
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : '詰み応手の展開に失敗しました。';
     const invalidRequest = /必要です|指定してください|JSON object/u.test(message);

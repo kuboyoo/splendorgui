@@ -15,19 +15,21 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timeout: NodeJS.Timeout;
+  requestLine: string;
   signal?: AbortSignal;
   abortHandler?: () => void;
 }
 
 const REQUEST_TIMEOUT_MS = 11 * 60 * 1_000;
-const ENGINE_PROTOCOL_VERSION = 1;
+const ENGINE_PROTOCOL_VERSION = 2;
 
 class CsplendorMateEngine {
   readonly protocolVersion = ENGINE_PROTOCOL_VERSION;
   private process: ChildProcessWithoutNullStreams | null = null;
   private requestSequence = 0;
   private pending = new Map<string, PendingRequest>();
-  private stderrTail = '';
+  private queue: string[] = [];
+  private activeRequestId: string | null = null;
 
   async request<T>(
     command: string,
@@ -35,38 +37,37 @@ class CsplendorMateEngine {
     signal?: AbortSignal,
   ): Promise<T> {
     if (signal?.aborted) throw this.abortError();
-    const child = this.ensureProcess();
     const requestId = String(++this.requestSequence);
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
+        const wasActive = this.activeRequestId === requestId;
         const pending = this.takePending(requestId);
         if (!pending) return;
         pending.reject(new Error(`詰み探索がタイムアウトしました（command: ${command}）。`));
-        this.stopProcess(
-          child,
-          new Error('先行する詰み探索がタイムアウトしたため、処理を中断しました。'),
-        );
+        if (wasActive) this.stopActiveProcess();
+        this.dispatchNext();
       }, REQUEST_TIMEOUT_MS);
       const abortHandler = signal
         ? () => {
+            const wasActive = this.activeRequestId === requestId;
             const pending = this.takePending(requestId);
             if (!pending) return;
             pending.reject(this.abortError());
-            // The Python worker processes stdin serially. Restarting it is the only
-            // way to stop the active native search and discard requests queued behind it.
-            this.stopProcess(
-              child,
-              new Error('先行する詰み探索が中断されたため、処理を中断しました。'),
-            );
+            // Only an active native search requires a worker restart. Requests that
+            // are still queued have not reached Python and can be removed in isolation.
+            if (wasActive) this.stopActiveProcess();
+            this.dispatchNext();
           }
         : undefined;
       this.pending.set(requestId, {
         resolve: (value) => resolve(value as T),
         reject,
         timeout,
+        requestLine: `${JSON.stringify({ request_id: requestId, command, payload })}\n`,
         signal,
         abortHandler,
       });
+      this.queue.push(requestId);
       if (signal && abortHandler) {
         signal.addEventListener('abort', abortHandler, { once: true });
       }
@@ -74,22 +75,17 @@ class CsplendorMateEngine {
         abortHandler?.();
         return;
       }
-      child.stdin.write(
-        `${JSON.stringify({ request_id: requestId, command, payload })}\n`,
-        (error) => {
-          if (!error) return;
-          const pending = this.takePending(requestId);
-          if (!pending) return;
-          pending.reject(new Error(`詰み探索エンジンへの送信に失敗しました: ${error.message}`));
-        },
-      );
+      this.dispatchNext();
     });
   }
 
   shutdown(): void {
     const child = this.process;
-    if (!child) return;
-    this.stopProcess(child, new Error('詰み探索エンジンを更新するため、処理を中断しました。'));
+    this.process = null;
+    this.activeRequestId = null;
+    this.queue = [];
+    this.rejectAll(new Error('詰み探索エンジンを更新するため、処理を中断しました。'));
+    if (child && !child.killed && child.exitCode === null) child.kill();
   }
 
   private ensureProcess(): ChildProcessWithoutNullStreams {
@@ -109,45 +105,86 @@ class CsplendorMateEngine {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.process = child;
-    this.stderrTail = '';
+    let stderrTail = '';
     const lines = readline.createInterface({ input: child.stdout });
-    lines.on('line', (line) => this.handleResponseLine(line));
+    lines.on('line', (line) => this.handleResponseLine(child, line));
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
-      this.stderrTail = `${this.stderrTail}${text}`.slice(-8_000);
+      stderrTail = `${stderrTail}${text}`.slice(-8_000);
       process.stderr.write(`[csplendor-mate-gui] ${text}`);
     });
     child.on('error', (error) => {
-      if (this.process !== child) return;
-      this.process = null;
-      this.rejectAll(new Error(`詰み探索エンジンを起動できません: ${error.message}`));
+      this.handleProcessFailure(
+        child,
+        new Error(`詰み探索エンジンを起動できません: ${error.message}`),
+      );
     });
     child.on('exit', (code, signal) => {
-      if (this.process !== child) return;
-      this.process = null;
-      const detail = this.stderrTail.trim();
-      this.rejectAll(new Error(
-        `詰み探索エンジンが終了しました（code=${String(code)}, signal=${String(signal)}）。${detail ? `\n${detail}` : ''}`,
-      ));
+      const detail = stderrTail.trim();
+      this.handleProcessFailure(
+        child,
+        new Error(
+          `詰み探索エンジンが終了しました（code=${String(code)}, signal=${String(signal)}）。${detail ? `\n${detail}` : ''}`,
+        ),
+      );
     });
     return child;
   }
 
-  private handleResponseLine(line: string): void {
+  private dispatchNext(): void {
+    if (this.activeRequestId !== null) return;
+    let requestId: string | undefined;
+    let pending: PendingRequest | undefined;
+    while (!pending && this.queue.length > 0) {
+      requestId = this.queue.shift();
+      if (requestId !== undefined) pending = this.pending.get(requestId);
+    }
+    if (!pending || requestId === undefined) return;
+
+    const child = this.ensureProcess();
+    this.activeRequestId = requestId;
+    child.stdin.write(pending.requestLine, (error) => {
+      if (!error || this.process !== child || this.activeRequestId !== requestId) return;
+      this.handleProcessFailure(
+        child,
+        new Error(`詰み探索エンジンへの送信に失敗しました: ${error.message}`),
+      );
+    });
+  }
+
+  private handleResponseLine(child: ChildProcessWithoutNullStreams, line: string): void {
+    if (this.process !== child) return;
     let response: WorkerResponse;
     try {
       response = JSON.parse(line) as WorkerResponse;
     } catch {
-      this.rejectAll(new Error(`詰み探索エンジンから不正な応答を受信しました: ${line}`));
+      this.handleProcessFailure(
+        child,
+        new Error(`詰み探索エンジンから不正な応答を受信しました: ${line}`),
+      );
       return;
     }
-    const pending = this.takePending(String(response.request_id));
-    if (!pending) return;
+    const requestId = String(response.request_id);
+    if (requestId !== this.activeRequestId) {
+      this.handleProcessFailure(
+        child,
+        new Error(`詰み探索エンジンから順序外の応答を受信しました: ${requestId}`),
+      );
+      return;
+    }
+    this.activeRequestId = null;
+    const pending = this.takePending(requestId);
+    if (!pending) {
+      this.dispatchNext();
+      return;
+    }
     if (!response.ok) {
       pending.reject(new Error(response.error || '詰み探索エンジンで不明なエラーが発生しました。'));
+      this.dispatchNext();
       return;
     }
     pending.resolve(response.result);
+    this.dispatchNext();
   }
 
   private rejectAll(error: Error): void {
@@ -166,6 +203,8 @@ class CsplendorMateEngine {
     const pending = this.pending.get(requestId);
     if (!pending) return undefined;
     this.pending.delete(requestId);
+    const queueIndex = this.queue.indexOf(requestId);
+    if (queueIndex >= 0) this.queue.splice(queueIndex, 1);
     clearTimeout(pending.timeout);
     if (pending.signal && pending.abortHandler) {
       pending.signal.removeEventListener('abort', pending.abortHandler);
@@ -173,11 +212,25 @@ class CsplendorMateEngine {
     return pending;
   }
 
-  private stopProcess(child: ChildProcessWithoutNullStreams, error: Error): void {
+  private stopActiveProcess(): void {
+    const child = this.process;
+    this.activeRequestId = null;
+    if (!child) return;
+    this.process = null;
+    if (!child.killed && child.exitCode === null) child.kill();
+  }
+
+  private handleProcessFailure(
+    child: ChildProcessWithoutNullStreams,
+    error: Error,
+  ): void {
     if (this.process !== child) return;
     this.process = null;
-    this.rejectAll(error);
     if (!child.killed && child.exitCode === null) child.kill();
+    const requestId = this.activeRequestId;
+    this.activeRequestId = null;
+    if (requestId !== null) this.takePending(requestId)?.reject(error);
+    this.dispatchNext();
   }
 
   private abortError(): Error {

@@ -87,7 +87,7 @@ DLSPLENDOR_GUI_TORCH_THREADS=4 npm run dev
 - `CSPLENDOR_PYTHON`: 遅延詰み探索ワーカーに使うPythonコマンド。既定は `python`。
 - `CSPLENDOR_MATE_NODE_LIMIT`: 1ノードの遅延展開に使う探索ノード上限。既定は `5000000`。
 - `CSPLENDOR_MATE_TIME_LIMIT`: 1ノードの遅延展開の秒数上限。既定は `30`。
-- `CSPLENDOR_MATE_EDGE_LIMIT`: 1ノードから返す具体応手・めくれ辺の上限。既定は `250000`。
+- `CSPLENDOR_MATE_EDGE_LIMIT`: 1ノードからブラウザへ返す具体応手・めくれ辺の上限。既定・安全上限は `10000`。応答全体も16 MiBを超える場合は拒否する。
 
 ローカルAI連携のテストでは、配置済みの `selfplay7`・`selfplay8`・`selfplay9`・`selfplay10`・`selfplay12` checkpointを実際に読み込み、人間対AIとAI観戦の着手を確認します。
 
