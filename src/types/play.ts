@@ -19,20 +19,13 @@ export interface PlayModelOption {
 export interface PlaySearchProfile {
   level: PlaySearchLevel;
   requested_simulations: number;
-  determinization: boolean;
-  tree_reuse: boolean;
-  root_noise: boolean;
-  mate_search_enabled: boolean;
-  mate_search_min_points: number | null;
-  mate_search_max_depth: number | null;
-  mate_search_max_nodes: number | null;
-  mate_search_time_limit_ms: number | null;
-  tactical_reserve_enabled: boolean;
-  tactical_reserve_simulations: number | null;
-  strategic_candidates_enabled: boolean;
-  strategic_candidate_simulations: number | null;
-  reserve_plan_enabled: boolean;
-  reserve_plan_simulations: number | null;
+  feature_labels: string[];
+}
+
+export interface PlayMateStatus {
+  kind: 'proven' | 'attempted' | 'available';
+  summary: string;
+  detail: string;
 }
 
 export interface PlayEngineInfo {
@@ -63,15 +56,8 @@ export interface PlayAiMove extends PlayMove {
   tree_reused: boolean;
   reused_visits: number;
   requested_simulations: number;
-  chance_nodes: number;
-  chance_outcomes_scored: number;
-  mate_search_attempted: boolean;
-  mate_proven: boolean;
-  mate_value_proven: boolean;
-  mate_depth: number | null;
-  mate_search_nodes: number;
-  mate_search_elapsed_ms: number;
-  mate_search_stop_reason: string | null;
+  diagnostic_labels: string[];
+  mate_status: PlayMateStatus | null;
   search_profile: PlaySearchProfile;
 }
 

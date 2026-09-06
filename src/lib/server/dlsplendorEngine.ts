@@ -20,7 +20,7 @@ interface PendingRequest {
 
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1_000;
 // Increment when the JSON-lines contract or session representation changes.
-const ENGINE_PROTOCOL_VERSION = 8;
+const ENGINE_PROTOCOL_VERSION = 9;
 
 class DlsplendorEngine {
   readonly protocolVersion = ENGINE_PROTOCOL_VERSION;

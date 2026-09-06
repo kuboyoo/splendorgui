@@ -27,7 +27,6 @@ import {
   PlayGamePayload,
   PlayMode,
   PlayModelOption,
-  PlaySearchProfile,
 } from '@/types/play';
 
 type BusyPhase = 'models' | 'starting' | 'human' | 'ai' | null;
@@ -112,45 +111,6 @@ function searchLevelLabel(level: PlayModelOption['search_level']): string {
   if (level === 'full') return 'フル探索';
   if (level === 'rule') return 'ルールAI';
   return '世代別探索';
-}
-
-function searchFeatureLabels(profile: PlaySearchProfile): string[] {
-  if (profile.level === 'rule') return ['ルールベース3手読み'];
-  const labels = [`MCTS ${profile.requested_simulations}`];
-  if (profile.mate_search_enabled) {
-    labels.push(
-      `完全詰み探索 ${profile.mate_search_min_points ?? 0}点〜 depth ${profile.mate_search_max_depth ?? '-'}`,
-    );
-  }
-  if (profile.tactical_reserve_enabled) {
-    labels.push(`戦術予約 ${profile.tactical_reserve_simulations ?? 0}`);
-  }
-  if (profile.strategic_candidates_enabled) {
-    labels.push(`戦略候補 ${profile.strategic_candidate_simulations ?? 0}`);
-  }
-  if (profile.reserve_plan_enabled) {
-    labels.push(`予約計画 ${profile.reserve_plan_simulations ?? 0}`);
-  }
-  if (profile.determinization) labels.push('非公開情報決定化');
-  if (profile.tree_reuse) labels.push('探索木再利用');
-  return labels;
-}
-
-function mateStopReasonLabel(reason: string | null): string {
-  switch (reason) {
-    case 'opponent_hidden_reserve':
-      return '相手の非公開予約があるため安全ゲートで保留';
-    case 'root_time_limit_exhausted':
-      return '局面探索の時間上限に到達';
-    case 'mate_proven_without_root_action':
-      return '勝敗は証明済み（着手は通常探索で選択）';
-    case 'proven_action_filtered':
-      return '証明手が支払い候補フィルタ対象';
-    case null:
-      return '未証明';
-    default:
-      return reason;
-  }
 }
 
 function resultLabel(game: PlayGamePayload): {
@@ -923,7 +883,7 @@ export default function PlayClient() {
                       </span>
                     </div>
                     <div className="mt-2 flex flex-wrap gap-1.5">
-                      {searchFeatureLabels(profile).map((feature) => (
+                      {profile.feature_labels.map((feature) => (
                         <span
                           key={feature}
                           className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[10px] font-bold text-slate-300"
@@ -1174,36 +1134,27 @@ export default function PlayClient() {
                         </dd>
                       </div>
                     </dl>
-                    {lastAiMove.search_profile.mate_search_enabled && (
+                    {lastAiMove.mate_status && (
                       <div
                         className={`mt-3 rounded-2xl border px-3 py-2.5 text-xs ${
-                          lastAiMove.mate_proven || lastAiMove.mate_value_proven
+                          lastAiMove.mate_status.kind === 'proven'
                             ? 'border-amber-400/40 bg-amber-400/10 text-amber-100'
                             : 'border-violet-400/20 bg-violet-400/10 text-violet-100'
                         }`}
                       >
                         <div className="flex items-center gap-2 font-black">
                           <Sparkles size={15} />
-                          {lastAiMove.mate_proven
-                            ? `詰み手を証明${lastAiMove.mate_depth === null ? '' : `（depth ${lastAiMove.mate_depth}）`}`
-                            : lastAiMove.mate_value_proven
-                              ? '勝敗を完全証明'
-                              : lastAiMove.mate_search_attempted
-                                ? '詰み探索を実行（未証明）'
-                                : `詰み探索は${lastAiMove.search_profile.mate_search_min_points ?? 0}点から自動発動`}
+                          {lastAiMove.mate_status.summary}
                         </div>
-                        {(lastAiMove.mate_search_attempted ||
-                          lastAiMove.mate_search_stop_reason) && (
+                        {lastAiMove.mate_status.detail && (
                           <div className="mt-1 leading-5 opacity-80">
-                            {lastAiMove.mate_search_nodes.toLocaleString()} nodes /{' '}
-                            {lastAiMove.mate_search_elapsed_ms.toFixed(1)} ms /{' '}
-                            {mateStopReasonLabel(lastAiMove.mate_search_stop_reason)}
+                            {lastAiMove.mate_status.detail}
                           </div>
                         )}
                       </div>
                     )}
                     <div className="mt-3 flex flex-wrap gap-1.5">
-                      {searchFeatureLabels(lastAiMove.search_profile).map((feature) => (
+                      {lastAiMove.search_profile.feature_labels.map((feature) => (
                         <span
                           key={feature}
                           className="rounded-lg border border-sky-400/10 bg-black/20 px-2 py-1 text-[10px] font-bold text-sky-200"
@@ -1211,11 +1162,14 @@ export default function PlayClient() {
                           {feature}
                         </span>
                       ))}
-                      {lastAiMove.chance_nodes > 0 && (
-                        <span className="rounded-lg border border-sky-400/10 bg-black/20 px-2 py-1 text-[10px] font-bold text-sky-200">
-                          chance {lastAiMove.chance_nodes} / scored {lastAiMove.chance_outcomes_scored}
+                      {lastAiMove.diagnostic_labels.map((diagnostic) => (
+                        <span
+                          key={diagnostic}
+                          className="rounded-lg border border-sky-400/10 bg-black/20 px-2 py-1 text-[10px] font-bold text-sky-200"
+                        >
+                          {diagnostic}
                         </span>
-                      )}
+                      ))}
                     </div>
                   </section>
                 )}

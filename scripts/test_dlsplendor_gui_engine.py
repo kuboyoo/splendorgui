@@ -271,7 +271,7 @@ class RulePlayerSessionTest(unittest.TestCase):
             "rule-cost-efficiency-3ply",
         )
         self.assertEqual(moved["ai_move"]["search_profile"]["level"], "rule")
-        self.assertFalse(moved["ai_move"]["mate_search_attempted"])
+        self.assertIsNone(moved["ai_move"]["mate_status"])
 
 
 class FullSearchDiagnosticsTest(unittest.TestCase):
@@ -331,18 +331,58 @@ class FullSearchDiagnosticsTest(unittest.TestCase):
 
         profile = moved["player_search_profiles"][0]
         self.assertEqual(profile["level"], "full")
-        self.assertTrue(profile["mate_search_enabled"])
-        self.assertTrue(profile["tactical_reserve_enabled"])
-        self.assertTrue(profile["strategic_candidates_enabled"])
-        self.assertTrue(profile["reserve_plan_enabled"])
-        self.assertFalse(profile["root_noise"])
+        self.assertIn("MCTS 400", profile["feature_labels"])
+        self.assertTrue(
+            any(
+                label.startswith("完全詰み探索")
+                for label in profile["feature_labels"]
+            )
+        )
+        self.assertTrue(
+            any(label.startswith("戦術予約") for label in profile["feature_labels"])
+        )
+        self.assertTrue(
+            any(label.startswith("戦略候補") for label in profile["feature_labels"])
+        )
+        self.assertTrue(
+            any(label.startswith("予約計画") for label in profile["feature_labels"])
+        )
         self.assertEqual(moved["ai_move"]["requested_simulations"], 400)
         self.assertEqual(moved["ai_move"]["simulations"], 0)
-        self.assertTrue(moved["ai_move"]["mate_proven"])
-        self.assertEqual(moved["ai_move"]["mate_depth"], 2)
-        self.assertEqual(moved["ai_move"]["mate_search_nodes"], 321)
+        self.assertEqual(moved["ai_move"]["mate_status"]["kind"], "proven")
+        self.assertEqual(
+            moved["ai_move"]["mate_status"]["summary"],
+            "詰み手を証明（depth 2）",
+        )
+        self.assertIn("321 nodes", moved["ai_move"]["mate_status"]["detail"])
         self.assertEqual(moved["ai_move"]["reused_visits"], 37)
-        self.assertEqual(moved["ai_move"]["chance_outcomes_scored"], 12)
+        self.assertEqual(moved["ai_move"]["diagnostic_labels"], ["chance 4 / scored 12"])
+
+    def test_unknown_mate_stop_reason_is_not_exposed_to_ui(self) -> None:
+        config = engine.Config.from_yaml(
+            str(DLSPLENDOR_ROOT / "configs" / "selfplay16_exact_mate.yaml")
+        )
+        model = engine.LoadedModel(
+            model_id="test-model",
+            kind="checkpoint",
+            path="unused.pt",
+            config_path="unused.yaml",
+            config=config,
+            encoder=None,
+            network=None,
+        )
+
+        status = engine._mate_status(
+            model,
+            {
+                "mate_search_attempted": True,
+                "mate_search_stop_reason": "future_internal_reason",
+            },
+        )
+
+        self.assertIsNotNone(status)
+        self.assertNotIn("future_internal_reason", status["detail"])
+        self.assertIn("探索を終了", status["detail"])
 
 
 class LatestCheckpointIntegrationTest(unittest.TestCase):

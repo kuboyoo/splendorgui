@@ -36,7 +36,7 @@ from dlsplendor.search.mcts import MCTS
 
 MAX_SESSIONS = 24
 MAX_GAME_TURNS = 150
-PROTOCOL_VERSION = 8
+PROTOCOL_VERSION = 9
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -215,20 +215,7 @@ def _search_profile(model: LoadedModel, simulations: int) -> dict[str, Any]:
         return {
             "level": "rule",
             "requested_simulations": 0,
-            "determinization": False,
-            "tree_reuse": False,
-            "root_noise": False,
-            "mate_search_enabled": False,
-            "mate_search_min_points": None,
-            "mate_search_max_depth": None,
-            "mate_search_max_nodes": None,
-            "mate_search_time_limit_ms": None,
-            "tactical_reserve_enabled": False,
-            "tactical_reserve_simulations": None,
-            "strategic_candidates_enabled": False,
-            "strategic_candidate_simulations": None,
-            "reserve_plan_enabled": False,
-            "reserve_plan_simulations": None,
+            "feature_labels": ["ルールベース3手読み"],
         }
     if model.config is None:
         raise RuntimeError(f"{model.model_id}の探索設定がありません。")
@@ -242,30 +229,82 @@ def _search_profile(model: LoadedModel, simulations: int) -> dict[str, Any]:
             bool(search.reserve_plan_enabled),
         )
     )
+    feature_labels = [f"MCTS {simulations}"]
+    if search.mate_search_enabled:
+        feature_labels.append(
+            "完全詰み探索 "
+            f"{search.mate_search_min_points}点〜 depth {search.mate_search_max_depth}"
+        )
+    if search.tactical_reserve_enabled:
+        feature_labels.append(
+            f"戦術予約 {search.tactical_reserve_simulations}"
+        )
+    if search.strategic_candidates_enabled:
+        feature_labels.append(
+            f"戦略候補 {search.strategic_candidate_simulations}"
+        )
+    if search.reserve_plan_enabled:
+        feature_labels.append(f"予約計画 {search.reserve_plan_simulations}")
+    if search.determinization:
+        feature_labels.append("非公開情報決定化")
+    if search.reuse_tree:
+        feature_labels.append("探索木再利用")
+
     return {
         "level": "full" if full_search else "legacy",
         "requested_simulations": int(simulations),
-        "determinization": bool(search.determinization),
-        "tree_reuse": bool(search.reuse_tree),
-        # GUI対局は評価運用なので、学習用root noiseは常に無効。
-        "root_noise": False,
-        "mate_search_enabled": bool(search.mate_search_enabled),
-        "mate_search_min_points": int(search.mate_search_min_points),
-        "mate_search_max_depth": int(search.mate_search_max_depth),
-        "mate_search_max_nodes": int(search.mate_search_max_nodes),
-        "mate_search_time_limit_ms": int(search.mate_search_time_limit_ms),
-        "tactical_reserve_enabled": bool(search.tactical_reserve_enabled),
-        "tactical_reserve_simulations": int(
-            search.tactical_reserve_simulations
-        ),
-        "strategic_candidates_enabled": bool(
-            search.strategic_candidates_enabled
-        ),
-        "strategic_candidate_simulations": int(
-            search.strategic_candidate_simulations
-        ),
-        "reserve_plan_enabled": bool(search.reserve_plan_enabled),
-        "reserve_plan_simulations": int(search.reserve_plan_simulations),
+        "feature_labels": feature_labels,
+    }
+
+
+def _mate_status(
+    model: LoadedModel, search_info: dict[str, Any]
+) -> dict[str, str] | None:
+    if (
+        model.kind == "rule"
+        or model.config is None
+        or not model.config.search.mate_search_enabled
+    ):
+        return None
+
+    attempted = bool(search_info.get("mate_search_attempted", False))
+    proven = bool(search_info.get("mate_proven", False))
+    value_proven = bool(search_info.get("mate_value_proven", False))
+    depth = search_info.get("mate_depth")
+    reason = search_info.get("mate_search_stop_reason")
+    if proven:
+        depth_label = "" if depth is None else f"（depth {int(depth)}）"
+        kind = "proven"
+        summary = f"詰み手を証明{depth_label}"
+    elif value_proven:
+        kind = "proven"
+        summary = "勝敗を完全証明"
+    elif attempted:
+        kind = "attempted"
+        summary = "詰み探索を実行（未証明）"
+    else:
+        kind = "available"
+        summary = (
+            f"詰み探索は{model.config.search.mate_search_min_points}点から自動発動"
+        )
+
+    if not attempted and reason is None:
+        return {"kind": kind, "summary": summary, "detail": ""}
+
+    reason_labels = {
+        "opponent_hidden_reserve": "相手の非公開予約があるため安全ゲートで保留",
+        "root_time_limit_exhausted": "局面探索の時間上限に到達",
+        "mate_proven_without_root_action": "勝敗は証明済み（着手は通常探索で選択）",
+        "proven_action_filtered": "証明手が支払い候補フィルタ対象",
+        None: "未証明",
+    }
+    reason_label = reason_labels.get(reason, "探索を終了")
+    nodes = int(search_info.get("mate_search_nodes", 0))
+    elapsed_ms = float(search_info.get("mate_search_elapsed_ms", 0.0))
+    return {
+        "kind": kind,
+        "summary": summary,
+        "detail": f"{nodes:,} nodes / {elapsed_ms:.1f} ms / {reason_label}",
     }
 
 
@@ -679,6 +718,15 @@ def _ai_action(payload: dict[str, Any]) -> dict[str, Any]:
         actor="ai",
         model_id=model.model_id,
     )
+    search_profile = _search_profile(model, session.simulations)
+    diagnostics: list[str] = []
+    chance_nodes = int(search_info.get("chance_nodes", 0))
+    if chance_nodes > 0:
+        diagnostics.append(
+            "chance "
+            f"{chance_nodes} / scored "
+            f"{int(search_info.get('chance_outcomes_scored', 0))}"
+        )
     ai_move = {
         **move,
         "action_id": int(action_id),
@@ -693,32 +741,9 @@ def _ai_action(payload: dict[str, Any]) -> dict[str, Any]:
         "elapsed_ms": round(elapsed_ms),
         "tree_reused": bool(search_info.get("tree_reused", False)),
         "reused_visits": int(search_info.get("reused_visits", 0)),
-        "chance_nodes": int(search_info.get("chance_nodes", 0)),
-        "chance_outcomes_scored": int(
-            search_info.get("chance_outcomes_scored", 0)
-        ),
-        "mate_search_attempted": bool(
-            search_info.get("mate_search_attempted", False)
-        ),
-        "mate_proven": bool(search_info.get("mate_proven", False)),
-        "mate_value_proven": bool(
-            search_info.get("mate_value_proven", False)
-        ),
-        "mate_depth": (
-            None
-            if search_info.get("mate_depth") is None
-            else int(search_info["mate_depth"])
-        ),
-        "mate_search_nodes": int(search_info.get("mate_search_nodes", 0)),
-        "mate_search_elapsed_ms": float(
-            search_info.get("mate_search_elapsed_ms", 0.0)
-        ),
-        "mate_search_stop_reason": (
-            None
-            if search_info.get("mate_search_stop_reason") is None
-            else str(search_info["mate_search_stop_reason"])
-        ),
-        "search_profile": _search_profile(model, session.simulations),
+        "diagnostic_labels": diagnostics,
+        "mate_status": _mate_status(model, search_info),
+        "search_profile": search_profile,
     }
     return _session_payload(session, ai_move=ai_move)
 
