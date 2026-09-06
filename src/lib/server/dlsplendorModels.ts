@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { access } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import type { PlaySearchLevel } from '@/types/play';
 
 export interface DlsplendorModelDefinition {
   id: string;
@@ -10,6 +11,7 @@ export interface DlsplendorModelDefinition {
   label: string;
   note: string;
   recommended: boolean;
+  searchLevel: PlaySearchLevel;
   relativePath?: string;
   configRelativePath?: string;
 }
@@ -23,6 +25,7 @@ export interface DlsplendorModelOption {
   note: string;
   recommended: boolean;
   available: boolean;
+  search_level: PlaySearchLevel;
 }
 
 const SELFPLAY5_ITERATIONS = [139, 203, 380, 577, 824, 998] as const;
@@ -36,6 +39,47 @@ const SELFPLAY5_NOTES: Record<(typeof SELFPLAY5_ITERATIONS)[number], string> = {
   998: '824に107勝91敗2分',
 };
 
+const SELFPLAY17_MODEL: DlsplendorModelDefinition = {
+  id: 'selfplay17-best',
+  kind: 'checkpoint',
+  family: 'selfplay17',
+  iteration: 17,
+  label: 'selfplay17 best（現行最強）',
+  note: '独立800局52.56%・詰み探索を含むフル探索',
+  recommended: true,
+  searchLevel: 'full',
+  relativePath: path.join('models', 'selfplay17', 'best.pt'),
+  // selfplay17の学習用league設定と推論探索は同一。対局では学習項目を
+  // 持たない、採用済みのdeployment設定を明示して使う。
+  configRelativePath: path.join('configs', 'selfplay16_exact_mate.yaml'),
+};
+
+const SELFPLAY16_MODEL: DlsplendorModelDefinition = {
+  id: 'selfplay16-previous',
+  kind: 'checkpoint',
+  family: 'selfplay16',
+  iteration: 16,
+  label: 'selfplay16（直前champion）',
+  note: 'selfplay14重み＋検証済み完全詰み探索',
+  recommended: false,
+  searchLevel: 'full',
+  relativePath: path.join('models', 'selfplay14_card_economy', 'best.pt'),
+  configRelativePath: path.join('configs', 'selfplay16_exact_mate.yaml'),
+};
+
+const SELFPLAY13_MODEL: DlsplendorModelDefinition = {
+  id: 'selfplay13-best',
+  kind: 'checkpoint',
+  family: 'selfplay13',
+  iteration: 6,
+  label: 'selfplay13 best（iteration 000006）',
+  note: '予約計画・戦略候補を含む旧世代モデル',
+  recommended: false,
+  searchLevel: 'legacy',
+  relativePath: path.join('models', 'selfplay13', 'best.pt'),
+  configRelativePath: path.join('configs', 'selfplay13.yaml'),
+};
+
 const SELFPLAY12_MODEL: DlsplendorModelDefinition = {
   id: 'selfplay12-best',
   kind: 'checkpoint',
@@ -43,7 +87,8 @@ const SELFPLAY12_MODEL: DlsplendorModelDefinition = {
   iteration: 11,
   label: 'selfplay12 best（iteration 000011）',
   note: 'selfplay10 bestに408勝382敗10分（推定+11 Elo）',
-  recommended: true,
+  recommended: false,
+  searchLevel: 'legacy',
   relativePath: path.join('models', 'selfplay12', 'best.pt'),
   configRelativePath: path.join('configs', 'selfplay12.yaml'),
 };
@@ -56,6 +101,7 @@ const SELFPLAY10_MODEL: DlsplendorModelDefinition = {
   label: 'selfplay10 best（iteration 000007）',
   note: '公開山札確率・3手購入経路・妨害候補を学習',
   recommended: false,
+  searchLevel: 'legacy',
   relativePath: path.join('models', 'selfplay10', 'best.pt'),
   configRelativePath: path.join('configs', 'selfplay10.yaml'),
 };
@@ -68,6 +114,7 @@ const SELFPLAY9_MODEL: DlsplendorModelDefinition = {
   label: 'selfplay9 best（iteration 000012）',
   note: 'selfplay8 best比 推定+63 Elo',
   recommended: false,
+  searchLevel: 'legacy',
   relativePath: path.join('models', 'selfplay9', 'best.pt'),
   configRelativePath: path.join('configs', 'selfplay9.yaml'),
 };
@@ -80,6 +127,7 @@ const SELFPLAY8_MODEL: DlsplendorModelDefinition = {
   label: 'selfplay8 best（iteration 000008）',
   note: 'Gold橋渡し予約を強化',
   recommended: false,
+  searchLevel: 'legacy',
   relativePath: path.join('models', 'selfplay8', 'best.pt'),
   configRelativePath: path.join('configs', 'selfplay8.yaml'),
 };
@@ -92,6 +140,7 @@ const SELFPLAY7_MODEL: DlsplendorModelDefinition = {
   label: 'selfplay7 iteration 000030',
   note: 'multi-head pilot 30 iteration',
   recommended: false,
+  searchLevel: 'legacy',
   relativePath: path.join(
     'models',
     'selfplay7',
@@ -109,6 +158,7 @@ const COST_EFFICIENCY_RULE: DlsplendorModelDefinition = {
   label: 'ルールAI（3手・得点効率）',
   note: '3手以内の購入候補を得点÷支払い枚数で選択',
   recommended: false,
+  searchLevel: 'rule',
 };
 
 const SELFPLAY5_MODELS: readonly DlsplendorModelDefinition[] =
@@ -122,6 +172,7 @@ const SELFPLAY5_MODELS: readonly DlsplendorModelDefinition[] =
       label: `selfplay5 iteration ${padded}`,
       note: SELFPLAY5_NOTES[iteration],
       recommended: false,
+      searchLevel: 'legacy',
       relativePath: path.join(
         'models',
         'selfplay5',
@@ -132,6 +183,9 @@ const SELFPLAY5_MODELS: readonly DlsplendorModelDefinition[] =
   });
 
 export const DLSPLENDOR_MODELS: readonly DlsplendorModelDefinition[] = [
+  SELFPLAY17_MODEL,
+  SELFPLAY16_MODEL,
+  SELFPLAY13_MODEL,
   SELFPLAY12_MODEL,
   SELFPLAY10_MODEL,
   SELFPLAY9_MODEL,
@@ -174,6 +228,7 @@ export async function listDlsplendorModels(): Promise<DlsplendorModelOption[]> {
         note: model.note,
         recommended: model.recommended,
         available,
+        search_level: model.searchLevel,
       };
     }),
   );

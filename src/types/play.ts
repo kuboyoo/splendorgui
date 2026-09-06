@@ -2,6 +2,7 @@ import type { GameState } from './game';
 
 export type PlayMode = 'human-vs-ai' | 'ai-vs-ai';
 export type PlayTerminationReason = 'rules' | 'max-turns' | null;
+export type PlaySearchLevel = 'full' | 'legacy' | 'rule';
 
 export interface PlayModelOption {
   id: string;
@@ -12,6 +13,19 @@ export interface PlayModelOption {
   note: string;
   recommended: boolean;
   available: boolean;
+  search_level: PlaySearchLevel;
+}
+
+export interface PlaySearchProfile {
+  level: PlaySearchLevel;
+  requested_simulations: number;
+  feature_labels: string[];
+}
+
+export interface PlayMateStatus {
+  kind: 'proven' | 'attempted' | 'available';
+  summary: string;
+  detail: string;
 }
 
 export interface PlayEngineInfo {
@@ -40,12 +54,18 @@ export interface PlayAiMove extends PlayMove {
   value: number;
   elapsed_ms: number;
   tree_reused: boolean;
+  reused_visits: number;
+  requested_simulations: number;
+  diagnostic_labels: string[];
+  mate_status: PlayMateStatus | null;
+  search_profile: PlaySearchProfile;
 }
 
 export interface PlayGamePayload {
   session_id: string;
   mode: PlayMode;
   player_model_ids: [string | null, string | null];
+  player_search_profiles: [PlaySearchProfile | null, PlaySearchProfile | null];
   /** Human-vs-AI compatibility field. Prefer player_model_ids for display. */
   model_id: string;
   human_seat: 0 | 1 | null;

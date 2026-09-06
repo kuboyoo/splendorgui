@@ -6,6 +6,7 @@ type PlayerIndex = 0 | 1;
 
 export interface MateStrategyEdge {
   actionCode: number;
+  actionUsi?: string;
   revealCard: number | null;
   revealCards?: number[];
   oracleCard: number | null;
@@ -23,6 +24,12 @@ export interface MateStrategyNode {
   kind: string;
   resolution: string | null;
   children: MateStrategyEdge[];
+  expanded: boolean;
+  preferredAttackerActions: number[];
+  position?: string;
+  state?: string;
+  searchNodes?: number;
+  elapsedMs?: number;
 }
 
 export interface MateStrategyReplay {
@@ -31,6 +38,9 @@ export interface MateStrategyReplay {
   forcedWinDepth: number;
   root: number;
   nodes: Map<number, MateStrategyNode>;
+  lazy: boolean;
+  nodeIndex: Map<string, number>;
+  nextNodeId: number;
   initialSnapshot: PositionSnapshot;
   initialDeckCounts: [number, number, number];
 }
@@ -62,6 +72,24 @@ function optionalInteger(value: unknown): number | null {
 function asObject(value: unknown, message: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(message);
   return value as Record<string, unknown>;
+}
+
+function parsePreferredAttackerActions(
+  root: Record<string, unknown>,
+  attacker: PlayerIndex,
+): number[] {
+  const actions: number[] = [];
+  for (const rawEntry of Array.isArray(root.principal_line) ? root.principal_line : []) {
+    if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) continue;
+    const entry = rawEntry as Record<string, unknown>;
+    if (integer(entry.player) !== attacker) continue;
+    const rawAction = entry.action;
+    if (!rawAction || typeof rawAction !== 'object' || Array.isArray(rawAction)) continue;
+    const action = rawAction as Record<string, unknown>;
+    const code = integer(action.pack, integer(entry.action_code));
+    if (code >= 0 && Number.isSafeInteger(code)) actions.push(code);
+  }
+  return actions;
 }
 
 function parseDeckCounts(position: string): [number, number, number] {
@@ -131,6 +159,7 @@ function assertReplayableEdge(edge: MateStrategyEdge): void {
 
 export function strategyEdgeLabel(edge: MateStrategyEdge, snapshot: PositionSnapshot): string {
   assertReplayableEdge(edge);
+  if (edge.actionUsi) return edge.actionUsi;
   const action = decodeAction(edge.actionCode);
   if (action.type === 0 || action.type === 1) return `take:${countsToLetters(action.take ?? [])}${returnSuffix(action.returns ?? [])}`;
   if (action.type === 2) return `reserve:C${action.cardId}${returnSuffix(action.returns ?? [])}`;
@@ -138,6 +167,13 @@ export function strategyEdgeLabel(edge: MateStrategyEdge, snapshot: PositionSnap
   if (action.type === 4) return `buy:C${action.cardId}/pay:${countsToToken(purchasePayment(action.cardId ?? -1, action.goldAs ?? [], snapshot))}`;
   if (action.type === 5) return `noble:N${action.nobleId}`;
   return 'resolved';
+}
+
+export function strategyEdgeOutcomeLabel(edge: MateStrategyEdge, snapshot: PositionSnapshot): string {
+  const action = strategyEdgeLabel(edge, snapshot);
+  const reveals = edge.revealCards?.length ? edge.revealCards : edge.revealCard === null ? [] : [edge.revealCard];
+  if (reveals.length === 0) return action;
+  return `${action} # reveal:${reveals.map((card) => `C${card}`).join(',')}`;
 }
 
 function purchasePayment(cardId: number, goldAs: number[], snapshot: PositionSnapshot): PaymentVec {
@@ -164,11 +200,14 @@ export function applyStrategyEdge(replay: MateStrategyReplay, snapshot: Position
     comment: edgeRevealCard(edge) === null ? '' : `reveal:C${edgeRevealCard(edge)}`,
   };
   if (action.type < 0 || action.type > 5) throw new Error('未対応の action_code です。');
+  if (child.position) return parsePositionSnapshot(child.position);
   return applyMateMove(snapshot, move, child.player);
 }
 
-export function applyStrategyDeckCounts(deckCounts: [number, number, number], edge: MateStrategyEdge): [number, number, number] {
+export function applyStrategyDeckCounts(replay: MateStrategyReplay, deckCounts: [number, number, number], edge: MateStrategyEdge): [number, number, number] {
   assertReplayableEdge(edge);
+  const child = replay.nodes.get(edge.child);
+  if (child?.position) return parseDeckCounts(child.position);
   const next = [...deckCounts] as [number, number, number];
   const action = decodeAction(edge.actionCode);
   let level: number | null = null;
@@ -258,6 +297,8 @@ function parseCompactStrategyDag(dag: Record<string, unknown>): Map<number, Mate
       depth: integer(row[2], 0),
       kind: kindStrings[integer(row[3], 0)] ?? 'state',
       resolution: optionalInteger(row[4]) === null ? null : resolutionStrings[integer(row[4], -1)] ?? null,
+      expanded: true,
+      preferredAttackerActions: [],
       get children() {
         const cached = edgeCache.get(id);
         if (cached) return cached;
@@ -274,7 +315,43 @@ export function parseMateStrategy(text: string): MateStrategyReplay {
   const root = asObject(JSON.parse(text) as unknown, 'strategy.json が JSON オブジェクトではありません。');
   if (root.format !== 'csplendor_mate_strategy_v1') throw new Error('未対応の strategy.json 形式です。');
   const dag = asObject(root.strategy_dag, 'strategy_dag がありません。');
-  if (dag.complete !== true) throw new Error('完全な strategy DAG が必要です。');
+  const position = typeof root.position === 'string' ? root.position : '';
+  if (!position) throw new Error('初期局面がありません。');
+  const attacker = integer(root.attacker) === 1 ? 1 : 0;
+  const forcedWinDepth = integer(root.forced_win_depth, 0);
+  const preferredAttackerActions = parsePreferredAttackerActions(root, attacker);
+  const initialSnapshot = parsePositionSnapshot(position);
+  const initialDeckCounts = parseDeckCounts(position);
+  if (dag.complete !== true) {
+    const verification = asObject(root.verification, 'verification がありません。');
+    if (verification.all_reveals_verified !== true) {
+      throw new Error('全めくれ検証済みの strategy.json が必要です。');
+    }
+    const rootId = 0;
+    const nodes = new Map<number, MateStrategyNode>([[rootId, {
+      id: rootId,
+      player: initialSnapshot.currentPlayer,
+      depth: forcedWinDepth,
+      kind: 'state',
+      resolution: null,
+      children: [],
+      expanded: false,
+      preferredAttackerActions,
+      position,
+    }]]);
+    return {
+      position,
+      attacker,
+      forcedWinDepth,
+      root: rootId,
+      nodes,
+      lazy: true,
+      nodeIndex: new Map([[`root:${forcedWinDepth}:${position}`, rootId]]),
+      nextNodeId: 1,
+      initialSnapshot,
+      initialDeckCounts,
+    };
+  }
   const nodes = dag.format === 'strategy_dag_compact_v1'
     ? parseCompactStrategyDag(dag)
     : new Map<number, MateStrategyNode>();
@@ -304,20 +381,123 @@ export function parseMateStrategy(text: string): MateStrategyReplay {
         kind: typeof node.kind === 'string' ? node.kind : 'state',
         resolution: typeof node.resolution === 'string' ? node.resolution : null,
         children,
+        expanded: true,
+        preferredAttackerActions: [],
       });
     }
   }
   const rootId = integer(dag.root);
-  const position = typeof root.position === 'string' ? root.position : '';
   if (!nodes.has(rootId)) throw new Error('DAG ルートノードがありません。');
-  if (!position) throw new Error('初期局面がありません。');
+  let nextNodeId = 0;
+  for (const id of nodes.keys()) nextNodeId = Math.max(nextNodeId, id + 1);
   return {
     position,
-    attacker: integer(root.attacker) === 1 ? 1 : 0,
-    forcedWinDepth: integer(root.forced_win_depth, 0),
+    attacker,
+    forcedWinDepth,
     root: rootId,
     nodes,
-    initialSnapshot: parsePositionSnapshot(position),
-    initialDeckCounts: parseDeckCounts(position),
+    lazy: false,
+    nodeIndex: new Map(),
+    nextNodeId,
+    initialSnapshot,
+    initialDeckCounts,
   };
+}
+
+function lazyNodeKey(depth: number, state: string): string {
+  return `${depth}:${state}`;
+}
+
+export function mergeLazyMateFrontier(
+  replay: MateStrategyReplay,
+  parentId: number,
+  payloadValue: unknown,
+): MateStrategyReplay {
+  if (!replay.lazy) return replay;
+  const payload = asObject(payloadValue, '遅延応手APIの応答が不正です。');
+  if (payload.format !== 'csplendor_mate_frontier_v1') throw new Error('未対応の遅延応手形式です。');
+  if (payload.proven !== true || payload.complete !== true) {
+    const reason = typeof payload.unknown_reason === 'string'
+      ? payload.unknown_reason
+      : typeof payload.reason === 'string' ? payload.reason : '証明できませんでした。';
+    throw new Error(`このノードの応手を完全展開できませんでした: ${reason}`);
+  }
+  const parent = replay.nodes.get(parentId);
+  if (!parent) throw new Error(`遅延DAGノード ${parentId} がありません。`);
+  if (integer(payload.attacker) !== replay.attacker) throw new Error('遅延応手の攻め方が一致しません。');
+  if (integer(payload.depth) !== parent.depth || integer(payload.player) !== parent.player) {
+    throw new Error('遅延応手の局面情報が一致しません。');
+  }
+
+  const nodes = new Map(replay.nodes);
+  const nodeIndex = new Map(replay.nodeIndex);
+  let nextNodeId = replay.nextNodeId;
+  const parentState = typeof payload.state === 'string' ? payload.state : parent.state;
+  if (parentState) nodeIndex.set(lazyNodeKey(parent.depth, parentState), parentId);
+  const children: MateStrategyEdge[] = [];
+  for (const rawEdge of Array.isArray(payload.edges) ? payload.edges : []) {
+    const edge = asObject(rawEdge, '遅延応手のエッジが不正です。');
+    const childPosition = typeof edge.child_position === 'string' ? edge.child_position : '';
+    const childState = typeof edge.child_state === 'string' ? edge.child_state : '';
+    const childDepth = integer(edge.child_depth);
+    if (!childPosition || !childState || childDepth < 0) throw new Error('遅延応手の子局面が不正です。');
+    const actionCode = integer(edge.action_code, 0);
+    const matchingHint = parent.player === replay.attacker
+      && parent.preferredAttackerActions[0] === actionCode;
+    const consumedHints = matchingHint
+      ? 1
+      : Math.min(Math.max(0, parent.depth - childDepth), parent.preferredAttackerActions.length);
+    const childPreferredAttackerActions = parent.preferredAttackerActions.slice(consumedHints);
+    const key = lazyNodeKey(childDepth, childState);
+    let childId = nodeIndex.get(key);
+    if (childId === undefined) {
+      childId = nextNodeId;
+      nextNodeId += 1;
+      nodeIndex.set(key, childId);
+      const kind = typeof edge.child_kind === 'string' ? edge.child_kind : 'state';
+      nodes.set(childId, {
+        id: childId,
+        player: integer(edge.child_player) === 1 ? 1 : 0,
+        depth: childDepth,
+        kind,
+        resolution: typeof edge.child_resolution === 'string' ? edge.child_resolution : null,
+        children: [],
+        expanded: kind === 'terminal',
+        preferredAttackerActions: childPreferredAttackerActions,
+        position: childPosition,
+        state: childState,
+      });
+    } else {
+      const existing = nodes.get(childId);
+      if (existing && existing.preferredAttackerActions.length === 0 && childPreferredAttackerActions.length > 0) {
+        nodes.set(childId, { ...existing, preferredAttackerActions: childPreferredAttackerActions });
+      }
+    }
+    children.push({
+      actionCode,
+      actionUsi: typeof edge.action_usi === 'string' ? edge.action_usi : undefined,
+      revealCard: nullableInteger(edge.reveal_card),
+      oracleCard: null,
+      oracleReserve: false,
+      oracleReserveCard: null,
+      oracleReturnColor: null,
+      oracleGoldAs: [0, 0, 0, 0, 0],
+      child: childId,
+    });
+  }
+  const stats = payload.stats && typeof payload.stats === 'object' && !Array.isArray(payload.stats)
+    ? payload.stats as Record<string, unknown>
+    : {};
+  nodes.set(parentId, {
+    ...parent,
+    kind: typeof payload.kind === 'string' ? payload.kind : parent.kind,
+    resolution: typeof payload.resolution === 'string' ? payload.resolution : null,
+    position: typeof payload.position === 'string' ? payload.position : parent.position,
+    state: parentState,
+    children,
+    expanded: true,
+    searchNodes: integer(stats.nodes, 0),
+    elapsedMs: typeof stats.elapsed_ms === 'number' ? stats.elapsed_ms : undefined,
+  });
+  return { ...replay, nodes, nodeIndex, nextNodeId };
 }

@@ -10,6 +10,8 @@ import {
   Pause,
   Play,
   RotateCcw,
+  ShieldCheck,
+  Sparkles,
   StepForward,
   Swords,
   Timer,
@@ -105,6 +107,12 @@ function formatAction(action: Action): string {
   }
 }
 
+function searchLevelLabel(level: PlayModelOption['search_level']): string {
+  if (level === 'full') return 'フル探索';
+  if (level === 'rule') return 'ルールAI';
+  return '世代別探索';
+}
+
 function resultLabel(game: PlayGamePayload): {
   title: string;
   detail: string;
@@ -182,18 +190,17 @@ export default function PlayClient() {
         const comparison =
           payload.models.find(
             (model) =>
-              model.family === 'selfplay10' &&
+              model.family === 'selfplay16' &&
               model.available,
           ) ??
           payload.models.find(
             (model) =>
-              model.family === 'selfplay9' &&
+              model.family === 'selfplay13' &&
               model.available,
           ) ??
           payload.models.find(
             (model) =>
-              model.family === 'selfplay8' &&
-              model.iteration === 8 &&
+              model.family === 'selfplay12' &&
               model.available,
           ) ??
           payload.models.find(
@@ -499,6 +506,10 @@ export default function PlayClient() {
 
   const player0Name = playerName(0);
   const player1Name = playerName(1);
+  const setupModelIds =
+    mode === 'human-vs-ai'
+      ? [selectedModelId]
+      : [player0ModelId, player1ModelId];
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-950 via-zinc-950 to-slate-900 text-slate-100">
@@ -574,7 +585,7 @@ export default function PlayClient() {
                         value={model.id}
                         disabled={!model.available}
                       >
-                        {model.label} — {model.note}
+                        {model.recommended ? '★ ' : ''}{model.label} — {model.note}
                         {!model.available ? '（未配置）' : ''}
                       </option>
                     ))}
@@ -616,7 +627,7 @@ export default function PlayClient() {
                         value={model.id}
                         disabled={!model.available}
                       >
-                        {model.label} — {model.note}
+                        {model.recommended ? '★ ' : ''}{model.label} — {model.note}
                         {!model.available ? '（未配置）' : ''}
                       </option>
                     ))}
@@ -639,7 +650,7 @@ export default function PlayClient() {
                         value={model.id}
                         disabled={!model.available}
                       >
-                        {model.label} — {model.note}
+                        {model.recommended ? '★ ' : ''}{model.label} — {model.note}
                         {!model.available ? '（未配置）' : ''}
                       </option>
                     ))}
@@ -725,6 +736,39 @@ export default function PlayClient() {
                 </span>
               )}
             </button>
+          </div>
+
+          <div className="mt-4 grid gap-2 md:grid-cols-2">
+            {setupModelIds.map((modelId, index) => {
+              const model = modelForId(modelId);
+              if (!model) return null;
+              return (
+                <div
+                  key={`${index}-${model.id}`}
+                  className="flex flex-wrap items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-xs"
+                >
+                  <span className="font-black text-slate-200">
+                    {mode === 'human-vs-ai' ? '対戦AI' : `P${index}`} {model.label}
+                  </span>
+                  <span
+                    className={`rounded-full px-2 py-0.5 font-black ${
+                      model.search_level === 'full'
+                        ? 'bg-violet-500/20 text-violet-200'
+                        : model.search_level === 'rule'
+                          ? 'bg-slate-500/20 text-slate-300'
+                          : 'bg-sky-500/20 text-sky-200'
+                    }`}
+                  >
+                    {searchLevelLabel(model.search_level)}
+                  </span>
+                  {model.recommended && (
+                    <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 font-black text-emerald-200">
+                      現行champion
+                    </span>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </section>
 
@@ -816,6 +860,41 @@ export default function PlayClient() {
                         : `P${game.state.board.current_player} の手番`}
                 </div>
               </div>
+            </section>
+
+            <section
+              aria-label="有効なAI探索機能"
+              className="grid gap-3 md:grid-cols-2"
+            >
+              {game.player_search_profiles.map((profile, seat) => {
+                if (!profile) return null;
+                return (
+                  <div
+                    key={seat}
+                    className="rounded-2xl border border-violet-500/20 bg-violet-950/20 px-4 py-3"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <ShieldCheck size={15} className="text-violet-300" />
+                      <span className="text-xs font-black text-violet-100">
+                        P{seat} {modelForId(game.player_model_ids[seat])?.label ?? 'AI'}
+                      </span>
+                      <span className="rounded-full bg-violet-500/20 px-2 py-0.5 text-[10px] font-black text-violet-200">
+                        {searchLevelLabel(profile.level)}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {profile.feature_labels.map((feature) => (
+                        <span
+                          key={feature}
+                          className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[10px] font-bold text-slate-300"
+                        >
+                          {feature}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
             </section>
 
             {outcome && (
@@ -1031,7 +1110,7 @@ export default function PlayClient() {
                       <div className="rounded-xl bg-black/20 px-3 py-2">
                         <dt className="text-slate-500">simulations</dt>
                         <dd className="mt-0.5 font-black text-white">
-                          {lastAiMove.simulations}
+                          {lastAiMove.simulations} / {lastAiMove.requested_simulations}
                         </dd>
                       </div>
                       <div className="rounded-xl bg-black/20 px-3 py-2">
@@ -1049,10 +1128,49 @@ export default function PlayClient() {
                       <div className="rounded-xl bg-black/20 px-3 py-2">
                         <dt className="text-slate-500">tree</dt>
                         <dd className="mt-0.5 font-black text-white">
-                          {lastAiMove.tree_reused ? 'reused' : 'new'}
+                          {lastAiMove.tree_reused
+                            ? `reused (${lastAiMove.reused_visits})`
+                            : 'new'}
                         </dd>
                       </div>
                     </dl>
+                    {lastAiMove.mate_status && (
+                      <div
+                        className={`mt-3 rounded-2xl border px-3 py-2.5 text-xs ${
+                          lastAiMove.mate_status.kind === 'proven'
+                            ? 'border-amber-400/40 bg-amber-400/10 text-amber-100'
+                            : 'border-violet-400/20 bg-violet-400/10 text-violet-100'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 font-black">
+                          <Sparkles size={15} />
+                          {lastAiMove.mate_status.summary}
+                        </div>
+                        {lastAiMove.mate_status.detail && (
+                          <div className="mt-1 leading-5 opacity-80">
+                            {lastAiMove.mate_status.detail}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {lastAiMove.search_profile.feature_labels.map((feature) => (
+                        <span
+                          key={feature}
+                          className="rounded-lg border border-sky-400/10 bg-black/20 px-2 py-1 text-[10px] font-bold text-sky-200"
+                        >
+                          {feature}
+                        </span>
+                      ))}
+                      {lastAiMove.diagnostic_labels.map((diagnostic) => (
+                        <span
+                          key={diagnostic}
+                          className="rounded-lg border border-sky-400/10 bg-black/20 px-2 py-1 text-[10px] font-bold text-sky-200"
+                        >
+                          {diagnostic}
+                        </span>
+                      ))}
+                    </div>
                   </section>
                 )}
 

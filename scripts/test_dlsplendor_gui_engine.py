@@ -4,7 +4,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from unittest.mock import patch
 
 import csplendor
 
@@ -20,9 +20,63 @@ if DLSPLENDOR_ROOT.is_dir():
 from scripts import dlsplendor_gui_engine as engine  # noqa: E402
 
 
+class DeviceResolutionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.original_device = os.environ.pop("DLSPLENDOR_GUI_DEVICE", None)
+
+    def tearDown(self) -> None:
+        if self.original_device is None:
+            os.environ.pop("DLSPLENDOR_GUI_DEVICE", None)
+        else:
+            os.environ["DLSPLENDOR_GUI_DEVICE"] = self.original_device
+
+    def test_default_prefers_cuda_over_mps(self) -> None:
+        with (
+            patch.object(engine.torch.cuda, "is_available", return_value=True),
+            patch.object(
+                engine.torch.backends.mps, "is_available", return_value=True
+            ),
+        ):
+            self.assertEqual(engine._resolve_device(), engine.torch.device("cuda"))
+
+    def test_default_uses_mps_when_cuda_is_unavailable(self) -> None:
+        with (
+            patch.object(engine.torch.cuda, "is_available", return_value=False),
+            patch.object(
+                engine.torch.backends.mps, "is_available", return_value=True
+            ),
+        ):
+            self.assertEqual(engine._resolve_device(), engine.torch.device("mps"))
+
+    def test_default_falls_back_to_cpu_without_accelerator(self) -> None:
+        with (
+            patch.object(engine.torch.cuda, "is_available", return_value=False),
+            patch.object(
+                engine.torch.backends.mps, "is_available", return_value=False
+            ),
+        ):
+            self.assertEqual(engine._resolve_device(), engine.torch.device("cpu"))
+
+    def test_explicit_mps_requires_an_available_backend(self) -> None:
+        os.environ["DLSPLENDOR_GUI_DEVICE"] = "mps"
+        with patch.object(
+            engine.torch.backends.mps, "is_available", return_value=False
+        ):
+            with self.assertRaisesRegex(RuntimeError, "MPSを利用できません"):
+                engine._resolve_device()
+
+
 class GameTurnAdjudicationTest(unittest.TestCase):
     def make_session(self, game: csplendor.Game) -> engine.GameSession:
-        model = SimpleNamespace(model_id="test-model")
+        model = engine.LoadedModel(
+            model_id="test-model",
+            kind="rule",
+            path=None,
+            config_path=None,
+            config=None,
+            encoder=None,
+            network=None,
+        )
         return engine.GameSession(
             session_id="test-session",
             mode="ai-vs-ai",
@@ -95,7 +149,15 @@ class HiddenReservationPrivacyTest(unittest.TestCase):
         *,
         human_seat: int | None,
     ) -> engine.GameSession:
-        model = SimpleNamespace(model_id="test-model")
+        model = engine.LoadedModel(
+            model_id="test-model",
+            kind="rule",
+            path=None,
+            config_path=None,
+            config=None,
+            encoder=None,
+            network=None,
+        )
         models = (
             (model, model)
             if human_seat is None
@@ -208,6 +270,119 @@ class RulePlayerSessionTest(unittest.TestCase):
             moved["ai_move"]["model_id"],
             "rule-cost-efficiency-3ply",
         )
+        self.assertEqual(moved["ai_move"]["search_profile"]["level"], "rule")
+        self.assertIsNone(moved["ai_move"]["mate_status"])
+
+
+class FullSearchDiagnosticsTest(unittest.TestCase):
+    class FakeMcts:
+        def search(self, game, *, num_simulations, add_root_noise):
+            del add_root_noise
+            action_id = engine.ACTION_ENCODER.encode(game.legal_actions[0], game)
+            return action_id, {
+                "simulations": 0,
+                "requested_simulations": num_simulations,
+                "value": 1.0,
+                "tree_reused": True,
+                "reused_visits": 37,
+                "chance_nodes": 4,
+                "chance_outcomes_scored": 12,
+                "mate_search_attempted": True,
+                "mate_proven": True,
+                "mate_value_proven": True,
+                "mate_depth": 2,
+                "mate_search_nodes": 321,
+                "mate_search_elapsed_ms": 7.5,
+                "mate_search_stop_reason": "mate",
+            }
+
+        def observe_transition(self, before, action_id, game):
+            del before, action_id, game
+
+    def tearDown(self) -> None:
+        engine.SESSIONS.clear()
+
+    def test_full_search_profile_and_mate_result_are_returned(self) -> None:
+        config = engine.Config.from_yaml(
+            str(DLSPLENDOR_ROOT / "configs" / "selfplay16_exact_mate.yaml")
+        )
+        model = engine.LoadedModel(
+            model_id="selfplay17-best",
+            kind="checkpoint",
+            path="unused.pt",
+            config_path="unused.yaml",
+            config=config,
+            encoder=None,
+            network=None,
+        )
+        session = engine.GameSession(
+            session_id="full-search-test",
+            mode="human-vs-ai",
+            models_by_seat=(model, None),
+            human_seat=1,
+            simulations=400,
+            seed=1,
+            game=csplendor.Game(seed=1),
+            mcts_by_seat=(self.FakeMcts(), None),
+        )
+        engine.SESSIONS[session.session_id] = session
+
+        moved = engine._ai_action({"session_id": session.session_id})
+
+        profile = moved["player_search_profiles"][0]
+        self.assertEqual(profile["level"], "full")
+        self.assertIn("MCTS 400", profile["feature_labels"])
+        self.assertTrue(
+            any(
+                label.startswith("完全詰み探索")
+                for label in profile["feature_labels"]
+            )
+        )
+        self.assertTrue(
+            any(label.startswith("戦術予約") for label in profile["feature_labels"])
+        )
+        self.assertTrue(
+            any(label.startswith("戦略候補") for label in profile["feature_labels"])
+        )
+        self.assertTrue(
+            any(label.startswith("予約計画") for label in profile["feature_labels"])
+        )
+        self.assertEqual(moved["ai_move"]["requested_simulations"], 400)
+        self.assertEqual(moved["ai_move"]["simulations"], 0)
+        self.assertEqual(moved["ai_move"]["mate_status"]["kind"], "proven")
+        self.assertEqual(
+            moved["ai_move"]["mate_status"]["summary"],
+            "詰み手を証明（depth 2）",
+        )
+        self.assertIn("321 nodes", moved["ai_move"]["mate_status"]["detail"])
+        self.assertEqual(moved["ai_move"]["reused_visits"], 37)
+        self.assertEqual(moved["ai_move"]["diagnostic_labels"], ["chance 4 / scored 12"])
+
+    def test_unknown_mate_stop_reason_is_not_exposed_to_ui(self) -> None:
+        config = engine.Config.from_yaml(
+            str(DLSPLENDOR_ROOT / "configs" / "selfplay16_exact_mate.yaml")
+        )
+        model = engine.LoadedModel(
+            model_id="test-model",
+            kind="checkpoint",
+            path="unused.pt",
+            config_path="unused.yaml",
+            config=config,
+            encoder=None,
+            network=None,
+        )
+
+        status = engine._mate_status(
+            model,
+            {
+                "mate_search_attempted": True,
+                "mate_search_stop_reason": "future_internal_reason",
+            },
+        )
+
+        self.assertIsNotNone(status)
+        self.assertNotIn("future_internal_reason", status["detail"])
+        self.assertIn("探索を終了", status["detail"])
 
 
 class LatestCheckpointIntegrationTest(unittest.TestCase):
@@ -216,21 +391,35 @@ class LatestCheckpointIntegrationTest(unittest.TestCase):
             "selfplay7-iteration-000030",
             "selfplay7",
             Path("weights") / "iteration_000030.pt",
+            "selfplay7",
         ),
-        ("selfplay8-best", "selfplay8", Path("best.pt")),
-        ("selfplay9-best", "selfplay9", Path("best.pt")),
-        ("selfplay10-best", "selfplay10", Path("best.pt")),
-        ("selfplay12-best", "selfplay12", Path("best.pt")),
+        ("selfplay8-best", "selfplay8", Path("best.pt"), "selfplay8"),
+        ("selfplay9-best", "selfplay9", Path("best.pt"), "selfplay9"),
+        ("selfplay10-best", "selfplay10", Path("best.pt"), "selfplay10"),
+        ("selfplay12-best", "selfplay12", Path("best.pt"), "selfplay12"),
+        ("selfplay13-best", "selfplay13", Path("best.pt"), "selfplay13"),
+        (
+            "selfplay16-previous",
+            "selfplay14_card_economy",
+            Path("best.pt"),
+            "selfplay16_exact_mate",
+        ),
+        (
+            "selfplay17-best",
+            "selfplay17",
+            Path("best.pt"),
+            "selfplay16_exact_mate",
+        ),
     )
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.dlsplendor_root = DLSPLENDOR_ROOT
         missing = [
-            family
-            for _, family, relative_path in cls.DEFINITIONS
+            model_id
+            for model_id, family, relative_path, config_name in cls.DEFINITIONS
             if not cls.model_path(family, relative_path).is_file()
-            or not cls.config_path(family).is_file()
+            or not cls.config_path(config_name).is_file()
         ]
         if missing:
             raise unittest.SkipTest(
@@ -250,11 +439,11 @@ class LatestCheckpointIntegrationTest(unittest.TestCase):
         return cls.dlsplendor_root / "models" / family / relative_path
 
     @classmethod
-    def config_path(cls, family: str) -> Path:
-        return cls.dlsplendor_root / "configs" / f"{family}.yaml"
+    def config_path(cls, config_name: str) -> Path:
+        return cls.dlsplendor_root / "configs" / f"{config_name}.yaml"
 
     def test_multihead_models_can_play_human_match(self) -> None:
-        for model_id, family, relative_path in self.DEFINITIONS:
+        for model_id, family, relative_path, config_name in self.DEFINITIONS:
             with self.subTest(family=family):
                 payload = engine._new_game(
                     {
@@ -266,7 +455,7 @@ class LatestCheckpointIntegrationTest(unittest.TestCase):
                             None,
                         ],
                         "model_config_paths": [
-                            str(self.config_path(family)),
+                            str(self.config_path(config_name)),
                             None,
                         ],
                         "human_seat": 1,
@@ -433,19 +622,57 @@ class LatestCheckpointIntegrationTest(unittest.TestCase):
             ["selfplay10-best", "selfplay12-best"],
         )
 
-    def test_human_move_can_be_followed_by_selfplay12_move(self) -> None:
+    def test_previous_champion_vs_selfplay17_can_play_spectator_match(self) -> None:
+        payload = engine._new_game(
+            {
+                "mode": "ai-vs-ai",
+                "player_kinds": ["checkpoint", "checkpoint"],
+                "model_ids": ["selfplay16-previous", "selfplay17-best"],
+                "model_paths": [
+                    str(self.model_path("selfplay14_card_economy")),
+                    str(self.model_path("selfplay17")),
+                ],
+                "model_config_paths": [
+                    str(self.config_path("selfplay16_exact_mate")),
+                    str(self.config_path("selfplay16_exact_mate")),
+                ],
+                "human_seat": None,
+                "simulations": 1,
+                "seed": 290,
+            }
+        )
+
+        first_move = engine._ai_action({"session_id": payload["session_id"]})
+        second_move = engine._ai_action({"session_id": payload["session_id"]})
+
+        self.assertEqual(
+            second_move["player_model_ids"],
+            ["selfplay16-previous", "selfplay17-best"],
+        )
+        self.assertEqual(
+            first_move["ai_move"]["search_profile"]["level"], "full"
+        )
+        self.assertEqual(
+            second_move["ai_move"]["search_profile"]["level"], "full"
+        )
+        self.assertEqual(
+            [move["model_id"] for move in second_move["moves"]],
+            ["selfplay16-previous", "selfplay17-best"],
+        )
+
+    def test_human_move_can_be_followed_by_selfplay17_move(self) -> None:
         payload = engine._new_game(
             {
                 "mode": "human-vs-ai",
                 "player_kinds": [None, "checkpoint"],
-                "model_ids": [None, "selfplay12-best"],
+                "model_ids": [None, "selfplay17-best"],
                 "model_paths": [
                     None,
-                    str(self.model_path("selfplay12")),
+                    str(self.model_path("selfplay17")),
                 ],
                 "model_config_paths": [
                     None,
-                    str(self.config_path("selfplay12")),
+                    str(self.config_path("selfplay16_exact_mate")),
                 ],
                 "human_seat": 0,
                 "simulations": 1,
@@ -462,7 +689,7 @@ class LatestCheckpointIntegrationTest(unittest.TestCase):
         self.assertEqual(after_ai["moves"][1]["actor"], "ai")
         self.assertEqual(
             after_ai["moves"][1]["model_id"],
-            "selfplay12-best",
+            "selfplay17-best",
         )
 
 

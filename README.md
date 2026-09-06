@@ -70,7 +70,7 @@ checkpoint不要の基準AIとして、`ルールAI（3手・得点効率）` �
 
 `AI vs AI 観戦` を選ぶと、P0・P1それぞれのAIを指定して対局を自動再生できます。着手間隔は0秒以上の任意値（小数可）で、観戦中にも変更できます。一時停止・再開・1手進行に対応し、各着手と探索情報は右側の棋譜・検索欄へ記録されます。指定間隔は着手前の待機時間で、実際の表示間隔にはAIの探索時間も加わります。モデル同士が停滞した場合は、`dlsplendor` のArenaと同じく150ターンで打ち切り、引き分けとして表示します。
 
-CPUで学習を並行実行しても負荷が集中しないよう、GUI用ワーカーのPyTorchスレッド数は既定で2です。必要な場合だけ起動前に変更してください。
+推論デバイスは利用可能性に応じて CUDA、MPS（Apple Silicon）、CPU の順に自動選択します。CPUで学習を並行実行しても負荷が集中しないよう、GUI用ワーカーのPyTorchスレッド数は既定で2です。必要な場合だけ起動前に変更してください。
 
 ```bash
 DLSPLENDOR_GUI_TORCH_THREADS=4 npm run dev
@@ -81,7 +81,13 @@ DLSPLENDOR_GUI_TORCH_THREADS=4 npm run dev
 - `DLSPLENDOR_ROOT`: `dlsplendor` の絶対パス。既定は `../dlsplendor`。
 - `DLSPLENDOR_PYTHON`: ワーカー起動に使うPythonコマンド。既定は `python`。
 - `DLSPLENDOR_GUI_TORCH_THREADS`: PyTorchのCPUスレッド数。既定は `2`。
-- `DLSPLENDOR_GUI_DEVICE`: `cpu`、`cuda`、`auto`。既定は `cpu`。
+- `DLSPLENDOR_GUI_DEVICE`: `cpu`、`cuda`、`mps`、`auto`。既定は `auto`。
+  `auto` は CUDA、MPS（Apple Silicon）、CPU の順に選択します。`mps` を明示した場合、MPSを利用できない環境では起動時にエラーになります。
+- `CSPLENDOR_ROOT`: `csplendor` の絶対パス。既定は `../csplendor`。
+- `CSPLENDOR_PYTHON`: 遅延詰み探索ワーカーに使うPythonコマンド。既定は `python`。
+- `CSPLENDOR_MATE_NODE_LIMIT`: 1ノードの遅延展開に使う探索ノード上限。既定は `5000000`。
+- `CSPLENDOR_MATE_TIME_LIMIT`: 1ノードの遅延展開の秒数上限。既定は `30`。
+- `CSPLENDOR_MATE_EDGE_LIMIT`: 1ノードからブラウザへ返す具体応手・めくれ辺の上限。既定・安全上限は `10000`。応答全体も16 MiBを超える場合は拒否する。
 
 ローカルAI連携のテストでは、配置済みの `selfplay7`・`selfplay8`・`selfplay9`・`selfplay10`・`selfplay12` checkpointを実際に読み込み、人間対AIとAI観戦の着手を確認します。
 
@@ -123,6 +129,11 @@ gcloud run deploy lisplendor \
 `generate_mate_puzzles.py` が保存した `strategy.json` を画面上部の `詰み手順読込` から読み込めます。
 KIFU の公開カード補充は `reveal:C<id>` 注釈で再現します。`strategy.json` では
 `自動再生` と `応手選択` を切り替えられ、完全応手 DAG 内の変化を盤面操作または候補一覧から確認できます。
+完全DAGが上限超過で省略された検証済み `strategy.json` もそのまま読み込めます。この場合は
+ローカルの `csplendor` ワーカーが表示中ノードだけを検証し、攻撃側の証明手または守備側の
+全合法応手と全めくれを遅延取得します。`fix_mate_puzzles.py` による完全DAG化は不要です。
+子局面の継続にはSPNと併せて版付きエンジンスナップショットを使うため、最終ラウンドや
+貴族選択待ちをまたいでも探索状態を失いません。
 `strategy_dag_compact_v1` では、同じ応手へ進む複数の具体めくれを reveal group として保持し、
 現在ノードの候補だけを必要時に展開します。
 SPN に `bought:[<id>,...]` と player section の `nobles:[<id>,...]` が含まれる場合、

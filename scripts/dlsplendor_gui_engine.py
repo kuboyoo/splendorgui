@@ -36,7 +36,7 @@ from dlsplendor.search.mcts import MCTS
 
 MAX_SESSIONS = 24
 MAX_GAME_TURNS = 150
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 9
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -55,13 +55,21 @@ except RuntimeError:
 
 
 def _resolve_device() -> torch.device:
-    requested = os.environ.get("DLSPLENDOR_GUI_DEVICE", "cpu").strip().lower()
+    requested = os.environ.get("DLSPLENDOR_GUI_DEVICE", "auto").strip().lower()
     if requested == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
     if requested == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("DLSPLENDOR_GUI_DEVICE=cudaですが、CUDAを利用できません。")
-    if requested not in {"cpu", "cuda"}:
-        raise ValueError("DLSPLENDOR_GUI_DEVICEはcpu、cuda、autoのいずれかです。")
+    if requested == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("DLSPLENDOR_GUI_DEVICE=mpsですが、MPSを利用できません。")
+    if requested not in {"cpu", "cuda", "mps"}:
+        raise ValueError(
+            "DLSPLENDOR_GUI_DEVICEはcpu、cuda、mps、autoのいずれかです。"
+        )
     return torch.device(requested)
 
 
@@ -168,7 +176,12 @@ def _load_model(
         expected_action_dim,
         config.model,
     ).to(DEVICE)
-    network.load_compatible_state_dict(checkpoint["model_state_dict"])
+    # Deployment configs grow auxiliary heads and fixed adapter buffers over time.
+    # The dlsplendor compatibility loader still rejects trunk/policy mismatches,
+    # while allowing those explicitly optional additions for older champions.
+    network.load_compatible_state_dict(
+        checkpoint["model_state_dict"], allow_auxiliary_mismatch=True
+    )
     network.eval()
     loaded = LoadedModel(
         model_id=model_id,
@@ -193,6 +206,106 @@ def _load_model(
 def _optional_id(value: Any) -> int | None:
     parsed = int(value)
     return parsed if parsed >= 0 else None
+
+
+def _search_profile(model: LoadedModel, simulations: int) -> dict[str, Any]:
+    """Expose the effective deployment search without leaking model paths."""
+
+    if model.kind == "rule":
+        return {
+            "level": "rule",
+            "requested_simulations": 0,
+            "feature_labels": ["ルールベース3手読み"],
+        }
+    if model.config is None:
+        raise RuntimeError(f"{model.model_id}の探索設定がありません。")
+
+    search = model.config.search
+    full_search = all(
+        (
+            bool(search.mate_search_enabled),
+            bool(search.tactical_reserve_enabled),
+            bool(search.strategic_candidates_enabled),
+            bool(search.reserve_plan_enabled),
+        )
+    )
+    feature_labels = [f"MCTS {simulations}"]
+    if search.mate_search_enabled:
+        feature_labels.append(
+            "完全詰み探索 "
+            f"{search.mate_search_min_points}点〜 depth {search.mate_search_max_depth}"
+        )
+    if search.tactical_reserve_enabled:
+        feature_labels.append(
+            f"戦術予約 {search.tactical_reserve_simulations}"
+        )
+    if search.strategic_candidates_enabled:
+        feature_labels.append(
+            f"戦略候補 {search.strategic_candidate_simulations}"
+        )
+    if search.reserve_plan_enabled:
+        feature_labels.append(f"予約計画 {search.reserve_plan_simulations}")
+    if search.determinization:
+        feature_labels.append("非公開情報決定化")
+    if search.reuse_tree:
+        feature_labels.append("探索木再利用")
+
+    return {
+        "level": "full" if full_search else "legacy",
+        "requested_simulations": int(simulations),
+        "feature_labels": feature_labels,
+    }
+
+
+def _mate_status(
+    model: LoadedModel, search_info: dict[str, Any]
+) -> dict[str, str] | None:
+    if (
+        model.kind == "rule"
+        or model.config is None
+        or not model.config.search.mate_search_enabled
+    ):
+        return None
+
+    attempted = bool(search_info.get("mate_search_attempted", False))
+    proven = bool(search_info.get("mate_proven", False))
+    value_proven = bool(search_info.get("mate_value_proven", False))
+    depth = search_info.get("mate_depth")
+    reason = search_info.get("mate_search_stop_reason")
+    if proven:
+        depth_label = "" if depth is None else f"（depth {int(depth)}）"
+        kind = "proven"
+        summary = f"詰み手を証明{depth_label}"
+    elif value_proven:
+        kind = "proven"
+        summary = "勝敗を完全証明"
+    elif attempted:
+        kind = "attempted"
+        summary = "詰み探索を実行（未証明）"
+    else:
+        kind = "available"
+        summary = (
+            f"詰み探索は{model.config.search.mate_search_min_points}点から自動発動"
+        )
+
+    if not attempted and reason is None:
+        return {"kind": kind, "summary": summary, "detail": ""}
+
+    reason_labels = {
+        "opponent_hidden_reserve": "相手の非公開予約があるため安全ゲートで保留",
+        "root_time_limit_exhausted": "局面探索の時間上限に到達",
+        "mate_proven_without_root_action": "勝敗は証明済み（着手は通常探索で選択）",
+        "proven_action_filtered": "証明手が支払い候補フィルタ対象",
+        None: "未証明",
+    }
+    reason_label = reason_labels.get(reason, "探索を終了")
+    nodes = int(search_info.get("mate_search_nodes", 0))
+    elapsed_ms = float(search_info.get("mate_search_elapsed_ms", 0.0))
+    return {
+        "kind": kind,
+        "summary": summary,
+        "detail": f"{nodes:,} nodes / {elapsed_ms:.1f} ms / {reason_label}",
+    }
 
 
 def _serialize_action(game: csplendor.Game, action: csplendor.Action) -> dict[str, Any]:
@@ -316,6 +429,14 @@ def _session_payload(
             "mode": session.mode,
             "player_model_ids": [
                 model.model_id if model is not None else None
+                for model in session.models_by_seat
+            ],
+            "player_search_profiles": [
+                (
+                    _search_profile(model, session.simulations)
+                    if model is not None
+                    else None
+                )
                 for model in session.models_by_seat
             ],
             # Kept for compatibility with clients created before spectator mode.
@@ -597,13 +718,32 @@ def _ai_action(payload: dict[str, Any]) -> dict[str, Any]:
         actor="ai",
         model_id=model.model_id,
     )
+    search_profile = _search_profile(model, session.simulations)
+    diagnostics: list[str] = []
+    chance_nodes = int(search_info.get("chance_nodes", 0))
+    if chance_nodes > 0:
+        diagnostics.append(
+            "chance "
+            f"{chance_nodes} / scored "
+            f"{int(search_info.get('chance_outcomes_scored', 0))}"
+        )
     ai_move = {
         **move,
         "action_id": int(action_id),
         "simulations": int(search_info.get("simulations", 0)),
+        "requested_simulations": int(
+            search_info.get(
+                "requested_simulations",
+                session.simulations if model.kind == "checkpoint" else 0,
+            )
+        ),
         "value": float(search_info.get("value", 0.0)),
         "elapsed_ms": round(elapsed_ms),
         "tree_reused": bool(search_info.get("tree_reused", False)),
+        "reused_visits": int(search_info.get("reused_visits", 0)),
+        "diagnostic_labels": diagnostics,
+        "mate_status": _mate_status(model, search_info),
+        "search_profile": search_profile,
     }
     return _session_payload(session, ai_move=ai_move)
 

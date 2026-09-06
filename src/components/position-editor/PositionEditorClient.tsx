@@ -27,8 +27,10 @@ import {
   applyStrategyEdge,
   applyStrategyDeckCounts,
   edgeMatchesBoardTarget,
+  mergeLazyMateFrontier,
   parseMateStrategy,
   strategyEdgeLabel,
+  strategyEdgeOutcomeLabel,
   type MateStrategyEdge,
   type MateStrategyReplay,
   type MateStrategyStep,
@@ -608,6 +610,9 @@ export default function PositionEditorClient({
   const [mateStrategyMode, setMateStrategyMode] = useState<MateReplayMode>('auto');
   const [mateStrategySteps, setMateStrategySteps] = useState<MateStrategyStep[]>([]);
   const [mateStrategyChoices, setMateStrategyChoices] = useState<MateStrategyEdge[]>([]);
+  const [mateStrategyLoadingNodeId, setMateStrategyLoadingNodeId] = useState<number | null>(null);
+  const [mateStrategyFailedNodeId, setMateStrategyFailedNodeId] = useState<number | null>(null);
+  const [mateStrategyExpansionError, setMateStrategyExpansionError] = useState('');
   const [positionTextDraft, setPositionTextDraft] = useState<string | null>(null);
   const [positionTextError, setPositionTextError] = useState('');
 
@@ -1557,7 +1562,67 @@ export default function PositionEditorClient({
     () => mateStrategyCurrentNode?.children ?? [],
     [mateStrategyCurrentNode],
   );
+  const mateStrategyCurrentNodeLoading = mateStrategyCurrentNode !== null
+    && mateStrategyLoadingNodeId === mateStrategyCurrentNode.id;
   const analysisBoardLocked = pendingReveal !== null || pendingNobleChoice !== null;
+
+  useEffect(() => {
+    const replay = mateStrategy;
+    const node = mateStrategyCurrentNode;
+    if (!replay?.lazy || !node || node.expanded || mateStrategyFailedNodeId === node.id) return;
+
+    const nodeId = node.id;
+    const controller = new AbortController();
+    let cancelled = false;
+    setMateStrategyLoadingNodeId(nodeId);
+    setMateStrategyExpansionError('');
+    void (async () => {
+      try {
+        const response = await fetch('/api/mate/frontier', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            position: node.position,
+            state: node.state,
+            attacker: replay.attacker,
+            depth: node.depth,
+            preferred_attacker_actions: node.preferredAttackerActions,
+          }),
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        const payload: unknown = await response.json().catch(() => null);
+        if (!response.ok) {
+          const message = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
+            ? payload.error
+            : '詰み応手の展開に失敗しました。';
+          throw new Error(message);
+        }
+        const expanded = mergeLazyMateFrontier(replay, nodeId, payload);
+        if (cancelled) return;
+        setMateStrategy((current) => current === replay ? expanded : current);
+        const expandedNode = expanded.nodes.get(nodeId);
+        setStorageStatus(
+          `応手を遅延展開しました: ${expandedNode?.children.length ?? 0} 分岐 / ${expandedNode?.searchNodes ?? 0} nodes`,
+        );
+      } catch (error) {
+        if (cancelled || (error instanceof DOMException && error.name === 'AbortError')) return;
+        const message = extractErrorMessage(error, '詰み応手の展開に失敗しました。');
+        setMateStrategyFailedNodeId(nodeId);
+        setMateStrategyExpansionError(message);
+        setStorageStatus(message);
+      } finally {
+        if (!cancelled) {
+          setMateStrategyLoadingNodeId((current) => current === nodeId ? null : current);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+      setMateStrategyLoadingNodeId((current) => current === nodeId ? null : current);
+    };
+  }, [mateStrategy, mateStrategyCurrentNode, mateStrategyFailedNodeId]);
 
   const applySnapshot = useCallback((
     snapshot: PositionSnapshot,
@@ -1605,6 +1670,9 @@ export default function PositionEditorClient({
     setMateStrategy(null);
     setMateStrategySteps([]);
     setMateStrategyChoices([]);
+    setMateStrategyLoadingNodeId(null);
+    setMateStrategyFailedNodeId(null);
+    setMateStrategyExpansionError('');
 
     if (options?.savedPosition) {
       finalizeSavedPosition(options.savedPosition);
@@ -1630,6 +1698,9 @@ export default function PositionEditorClient({
       setMateStrategy(null);
       setMateStrategySteps([]);
       setMateStrategyChoices([]);
+      setMateStrategyLoadingNodeId(null);
+      setMateStrategyFailedNodeId(null);
+      setMateStrategyExpansionError('');
       setMateKifuDialogOpen(false);
       setStorageStatus(`詰み手順を読み込みました: ${replay.moves.length} 手`);
     } catch (error) {
@@ -1652,8 +1723,13 @@ export default function PositionEditorClient({
         label: '開始局面',
       }]);
       setMateStrategyChoices([]);
+      setMateStrategyLoadingNodeId(null);
+      setMateStrategyFailedNodeId(null);
+      setMateStrategyExpansionError('');
       setMateKifuDialogOpen(false);
-      setStorageStatus(`完全応手 DAG を読み込みました: ${replay.nodes.size} 局面`);
+      setStorageStatus(replay.lazy
+        ? '検証済み戦略を読み込みました。現在局面の応手を遅延展開します。'
+        : `完全応手 DAG を読み込みました: ${replay.nodes.size} 局面`);
     } catch (error) {
       setStorageStatus(extractErrorMessage(error, 'strategy.json を読み込めませんでした。'));
     }
@@ -1663,11 +1739,14 @@ export default function PositionEditorClient({
     if (!mateStrategy || !mateStrategyCurrentStep) return;
     try {
       const label = strategyEdgeLabel(edge, mateStrategyCurrentStep.snapshot);
+      const outcomeLabel = strategyEdgeOutcomeLabel(edge, mateStrategyCurrentStep.snapshot);
       const snapshot = applyStrategyEdge(mateStrategy, mateStrategyCurrentStep.snapshot, edge);
-      const deckCounts = applyStrategyDeckCounts(mateStrategyCurrentStep.deckCounts, edge);
-      setMateStrategySteps((prev) => [...prev, { nodeId: edge.child, snapshot, deckCounts, label }]);
+      const deckCounts = applyStrategyDeckCounts(mateStrategy, mateStrategyCurrentStep.deckCounts, edge);
+      setMateStrategySteps((prev) => [...prev, { nodeId: edge.child, snapshot, deckCounts, label: outcomeLabel }]);
       setMateStrategyChoices([]);
-      setStorageStatus(`応手を進めました: ${label}`);
+      setMateStrategyFailedNodeId(null);
+      setMateStrategyExpansionError('');
+      setStorageStatus(`応手を進めました: ${outcomeLabel || label}`);
     } catch (error) {
       setStorageStatus(extractErrorMessage(error, '応手を反映できませんでした。'));
     }
@@ -1690,6 +1769,8 @@ export default function PositionEditorClient({
   const undoMateStrategy = useCallback(() => {
     setMateStrategySteps((prev) => prev.length > 1 ? prev.slice(0, -1) : prev);
     setMateStrategyChoices([]);
+    setMateStrategyFailedNodeId(null);
+    setMateStrategyExpansionError('');
   }, []);
 
   const closeMateReplay = useCallback(() => {
@@ -1698,6 +1779,9 @@ export default function PositionEditorClient({
     setMateStrategy(null);
     setMateStrategySteps([]);
     setMateStrategyChoices([]);
+    setMateStrategyLoadingNodeId(null);
+    setMateStrategyFailedNodeId(null);
+    setMateStrategyExpansionError('');
     setStorageStatus('詰み手順の再生を終了しました。');
   }, []);
 
@@ -2095,66 +2179,106 @@ export default function PositionEditorClient({
             <div>
               <h1 className="font-black text-slate-900 text-2xl tracking-tight">局面エディタ</h1>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                onClick={() => {
-                  if (isAnalysisActive) {
-                    exitAnalysisMode('編集モードに戻りました。');
-                  } else {
-                    enterAnalysisMode();
-                  }
-                }}
-                disabled={isMateReplayActive}
-                className={`px-4 py-2 rounded-xl font-bold text-sm transition-colors ${
-                  isAnalysisActive
-                    ? 'bg-slate-800 text-white hover:bg-slate-900'
-                    : 'bg-sky-600 text-white hover:bg-sky-700'
-                } disabled:opacity-40`}
-              >
-                <Play size={15} className="inline mr-1" />
-                {isAnalysisActive ? '編集に戻る' : '検討モード'}
-              </button>
-              <button
-                onClick={() => setMateKifuDialogOpen(true)}
-                className="px-4 py-2 rounded-xl bg-violet-600 text-white font-bold text-sm hover:bg-violet-700 transition-colors"
-              >
-                <FileText size={15} className="inline mr-1" />
-                詰み手順読込
-              </button>
-              <button
-                onClick={resetAll}
-                className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-bold text-sm hover:bg-slate-200 transition-colors"
-              >
-                <RotateCcw size={15} className="inline mr-1" />
-                リセット
-              </button>
-              <button
-                onClick={() => void handleCopyCurrentShareUrl()}
-                disabled={remoteBusy}
-                className="px-4 py-2 rounded-xl bg-amber-500 text-white font-bold text-sm hover:bg-amber-600 transition-colors disabled:opacity-60"
-              >
-                <Copy size={15} className="inline mr-1" />
-                URL共有
-              </button>
-              <button
-                onClick={() => setStorageDialogMode('save')}
-                disabled={remoteBusy}
-                className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-bold text-sm hover:bg-indigo-700 transition-colors disabled:opacity-60"
-              >
-                <Save size={15} className="inline mr-1" />
-                局面保存
-              </button>
-              <button
-                onClick={() => void openLoadDialog()}
-                className="px-4 py-2 rounded-xl bg-emerald-600 text-white font-bold text-sm hover:bg-emerald-700 transition-colors"
-              >
-                <FolderOpen size={15} className="inline mr-1" />
-                局面読み込み
-              </button>
+            <div className="flex max-w-full flex-col items-end gap-2">
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  onClick={() => {
+                    if (isAnalysisActive) {
+                      exitAnalysisMode('編集モードに戻りました。');
+                    } else {
+                      enterAnalysisMode();
+                    }
+                  }}
+                  disabled={isMateReplayActive}
+                  className={`px-4 py-2 rounded-xl font-bold text-sm transition-colors ${
+                    isAnalysisActive
+                      ? 'bg-slate-800 text-white hover:bg-slate-900'
+                      : 'bg-sky-600 text-white hover:bg-sky-700'
+                  } disabled:opacity-40`}
+                >
+                  <Play size={15} className="inline mr-1" />
+                  {isAnalysisActive ? '編集に戻る' : '検討モード'}
+                </button>
+                <button
+                  onClick={() => setMateKifuDialogOpen(true)}
+                  className="px-4 py-2 rounded-xl bg-violet-600 text-white font-bold text-sm hover:bg-violet-700 transition-colors"
+                >
+                  <FileText size={15} className="inline mr-1" />
+                  詰み手順読込
+                </button>
+                <button
+                  onClick={resetAll}
+                  className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-bold text-sm hover:bg-slate-200 transition-colors"
+                >
+                  <RotateCcw size={15} className="inline mr-1" />
+                  リセット
+                </button>
+                <button
+                  onClick={() => void handleCopyCurrentShareUrl()}
+                  disabled={remoteBusy}
+                  className="px-4 py-2 rounded-xl bg-amber-500 text-white font-bold text-sm hover:bg-amber-600 transition-colors disabled:opacity-60"
+                >
+                  <Copy size={15} className="inline mr-1" />
+                  URL共有
+                </button>
+                <button
+                  onClick={() => setStorageDialogMode('save')}
+                  disabled={remoteBusy}
+                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-bold text-sm hover:bg-indigo-700 transition-colors disabled:opacity-60"
+                >
+                  <Save size={15} className="inline mr-1" />
+                  局面保存
+                </button>
+                <button
+                  onClick={() => void openLoadDialog()}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 text-white font-bold text-sm hover:bg-emerald-700 transition-colors"
+                >
+                  <FolderOpen size={15} className="inline mr-1" />
+                  局面読み込み
+                </button>
+              </div>
+              {mateStrategy && mateStrategyCurrentNode && (
+                <div className="flex flex-wrap items-center justify-end gap-2" aria-label="応手ツリー操作">
+                  <button
+                    onClick={() => {
+                      setMateStrategyMode('auto');
+                      setMateStrategyChoices([]);
+                    }}
+                    className={`px-3 py-2 rounded-xl text-xs font-bold ${mateStrategyMode === 'auto' ? 'bg-violet-600 text-white' : 'border border-slate-200 text-slate-700'}`}
+                  >
+                    自動再生
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMateStrategyMode('select');
+                      setMateStrategyChoices([]);
+                    }}
+                    className={`px-3 py-2 rounded-xl text-xs font-bold ${mateStrategyMode === 'select' ? 'bg-violet-600 text-white' : 'border border-slate-200 text-slate-700'}`}
+                  >
+                    応手選択
+                  </button>
+                  <button
+                    onClick={undoMateStrategy}
+                    disabled={mateStrategySteps.length <= 1}
+                    className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold disabled:opacity-40"
+                  >
+                    <ChevronLeft size={14} className="inline mr-1" />
+                    1手戻す
+                  </button>
+                  <button
+                    onClick={advanceMateStrategy}
+                    disabled={mateStrategyMode !== 'auto' || mateStrategyCurrentNodeLoading || mateStrategyOutgoing.length === 0}
+                    className="px-3 py-2 rounded-xl bg-violet-600 text-white text-xs font-bold disabled:opacity-40"
+                  >
+                    1手進める
+                    <ChevronRight size={14} className="inline ml-1" />
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
-          {storageStatus && (
+          {storageStatus && !mateStrategy && (
             <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
               {storageStatus}
             </div>
@@ -2172,14 +2296,6 @@ export default function PositionEditorClient({
               詰み手順再生中 / {mateReplayStep} / {mateReplay.moves.length} 手 / 結果: {mateReplay.result || '未記載'}
             </div>
           )}
-          {mateStrategy && mateStrategyCurrentNode && (
-            <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900">
-              完全応手 DAG 再生中 / {mateStrategyMode === 'auto' ? '自動再生' : '応手選択'} /
-              {' '}手数 {Math.max(0, mateStrategySteps.length - 1)} / ノード {mateStrategyCurrentNode.id} /
-              {' '}候補 {mateStrategyOutgoing.length}
-            </div>
-          )}
-
           {bankErrors.length > 0 && (
             <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 space-y-1">
               {bankErrors.map((message) => (
@@ -2329,7 +2445,9 @@ export default function PositionEditorClient({
           {mateStrategy && mateStrategyCurrentNode && (
             <section className="bg-white border border-violet-200 rounded-3xl p-5 space-y-4 shadow-2xl shadow-black/10">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <h2 className="font-black text-slate-900 text-xl">完全応手 DAG</h2>
+                <h2 className="font-black text-slate-900 text-xl">
+                  {mateStrategy.lazy ? '遅延応手ツリー' : '完全応手 DAG'}
+                </h2>
                 <button
                   onClick={closeMateReplay}
                   className="px-3 py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-bold"
@@ -2337,46 +2455,32 @@ export default function PositionEditorClient({
                   再生終了
                 </button>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={() => {
-                    setMateStrategyMode('auto');
-                    setMateStrategyChoices([]);
-                  }}
-                  className={`px-3 py-2 rounded-xl text-xs font-bold ${mateStrategyMode === 'auto' ? 'bg-violet-600 text-white' : 'border border-slate-200 text-slate-700'}`}
-                >
-                  自動再生
-                </button>
-                <button
-                  onClick={() => {
-                    setMateStrategyMode('select');
-                    setMateStrategyChoices([]);
-                  }}
-                  className={`px-3 py-2 rounded-xl text-xs font-bold ${mateStrategyMode === 'select' ? 'bg-violet-600 text-white' : 'border border-slate-200 text-slate-700'}`}
-                >
-                  応手選択
-                </button>
-                <button
-                  onClick={undoMateStrategy}
-                  disabled={mateStrategySteps.length <= 1}
-                  className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold disabled:opacity-40"
-                >
-                  <ChevronLeft size={14} className="inline mr-1" />
-                  1手戻す
-                </button>
-                <button
-                  onClick={advanceMateStrategy}
-                  disabled={mateStrategyMode !== 'auto' || mateStrategyOutgoing.length === 0}
-                  className="px-3 py-2 rounded-xl bg-violet-600 text-white text-xs font-bold disabled:opacity-40"
-                >
-                  1手進める
-                  <ChevronRight size={14} className="inline ml-1" />
-                </button>
-              </div>
               <div className="text-xs text-slate-600">
                 ノード {mateStrategyCurrentNode.id} / 手番 P{mateStrategyCurrentNode.player} /
                 {' '}depth {mateStrategyCurrentNode.depth} / 候補 {mateStrategyOutgoing.length}
+                {mateStrategyCurrentNode.searchNodes !== undefined && (
+                  <> / {mateStrategyCurrentNode.searchNodes} nodes / {Math.round(mateStrategyCurrentNode.elapsedMs ?? 0)} ms</>
+                )}
               </div>
+              {mateStrategyCurrentNodeLoading && (
+                <div className="rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-800">
+                  現在局面の全合法応手と全めくれを検証しています…
+                </div>
+              )}
+              {mateStrategyFailedNodeId === mateStrategyCurrentNode.id && (
+                <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 space-y-2">
+                  <div>{mateStrategyExpansionError || '応手を展開できませんでした。'}</div>
+                  <button
+                    onClick={() => {
+                      setMateStrategyFailedNodeId(null);
+                      setMateStrategyExpansionError('');
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-rose-600 text-white font-bold"
+                  >
+                    再試行
+                  </button>
+                </div>
+              )}
               {mateStrategyMode === 'select' && (
                 <div className="space-y-2 max-h-72 overflow-y-auto border border-slate-100 rounded-xl p-2">
                   {(mateStrategyChoices.length > 0 ? mateStrategyChoices : mateStrategyOutgoing).map((edge, index) => (
@@ -2385,10 +2489,10 @@ export default function PositionEditorClient({
                       onClick={() => chooseMateStrategyEdge(edge)}
                       className="block w-full text-left px-2 py-1.5 rounded-lg border border-slate-100 bg-slate-50 hover:bg-violet-50 text-xs font-mono text-slate-700"
                     >
-                      {strategyEdgeLabel(edge, mateStrategyCurrentStep?.snapshot ?? activeSnapshot)} → node {edge.child}
+                      {strategyEdgeOutcomeLabel(edge, mateStrategyCurrentStep?.snapshot ?? activeSnapshot)} → node {edge.child}
                     </button>
                   ))}
-                  {mateStrategyOutgoing.length === 0 && (
+                  {mateStrategyCurrentNode.expanded && mateStrategyOutgoing.length === 0 && (
                     <div className="px-2 py-1 text-xs text-slate-400">終端局面です。</div>
                   )}
                 </div>
@@ -2401,6 +2505,20 @@ export default function PositionEditorClient({
                 ))}
               </div>
             </section>
+          )}
+          {mateStrategy && mateStrategyCurrentNode && (
+            <div className="space-y-2">
+              <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900">
+                {mateStrategy.lazy ? '遅延応手ツリー' : '完全応手 DAG'} 再生中 / {mateStrategyMode === 'auto' ? '自動再生' : '応手選択'} /
+                {' '}手数 {Math.max(0, mateStrategySteps.length - 1)} / ノード {mateStrategyCurrentNode.id} /
+                {' '}{mateStrategyCurrentNodeLoading ? '応手を探索中' : `候補 ${mateStrategyOutgoing.length}`}
+              </div>
+              {storageStatus && (
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                  {storageStatus}
+                </div>
+              )}
+            </div>
           )}
 
           {isAnalysisActive && (
@@ -2543,7 +2661,7 @@ export default function PositionEditorClient({
               <div>
                 <h3 className="font-black text-slate-900 text-lg">詰み手順データの読み込み</h3>
                 <p className="text-xs text-slate-500 mt-1">
-                  代表手順の KIFU、または問題集の `strategy.json` を読み込めます。
+                  代表手順の KIFU、または問題集の `strategy.json` を読み込めます。不完全DAGは必要な局面だけ遅延展開します。
                 </p>
               </div>
               <button
@@ -2556,7 +2674,7 @@ export default function PositionEditorClient({
             </div>
             <div className="px-5 py-5 space-y-4">
               <div className="space-y-2">
-                <div className="text-sm font-bold text-slate-800">完全応手 DAG (`strategy.json`)</div>
+                <div className="text-sm font-bold text-slate-800">検証済み戦略 (`strategy.json`)</div>
                 <input
                   type="file"
                   accept="application/json,.json"
